@@ -147,6 +147,7 @@ struct DraftState {
 struct ToolCallMessageState {
     msg_id: MessageId,
     name: String,
+    details: Option<String>,
 }
 
 /// Flush the accumulated draft text as a finalized `sendMessage`.
@@ -250,8 +251,8 @@ pub async fn run_event_consumer(
                 }
             }
             AgentEvent::TextMessage(_) => unreachable!(),
-            AgentEvent::ToolCall { id, name } => {
-                let text = formatting::format_tool_call(name);
+            AgentEvent::ToolCall { id, name, details } => {
+                let text = formatting::format_tool_call(name, details.as_deref());
                 let disable_notification = message_count > 0;
                 message_count += 1;
                 if let Ok(sent) = bot
@@ -266,11 +267,17 @@ pub async fn run_event_consumer(
                         ToolCallMessageState {
                             msg_id: sent.id,
                             name: name.clone(),
+                            details: details.clone(),
                         },
                     );
                 }
             }
-            AgentEvent::ToolCallUpdate { id, name, output } => {
+            AgentEvent::ToolCallUpdate {
+                id,
+                name,
+                output,
+                details,
+            } => {
                 let resolved_name = if !name.is_empty() {
                     name.clone()
                 } else {
@@ -279,7 +286,16 @@ pub async fn run_event_consumer(
                         .map(|s| s.name.clone())
                         .unwrap_or_default()
                 };
-                let text = formatting::format_tool_result(&resolved_name, output.as_deref());
+                let resolved_details = if details.is_some() {
+                    details.clone()
+                } else {
+                    tool_call_messages.get(id).and_then(|s| s.details.clone())
+                };
+                let text = formatting::format_tool_result(
+                    &resolved_name,
+                    output.as_deref(),
+                    resolved_details.as_deref(),
+                );
 
                 if let Some(state) = tool_call_messages.get_mut(id) {
                     if bot
@@ -290,6 +306,9 @@ pub async fn run_event_consumer(
                     {
                         if !name.is_empty() {
                             state.name = name.clone();
+                        }
+                        if details.is_some() {
+                            state.details = details.clone();
                         }
                         continue;
                     }
@@ -310,6 +329,7 @@ pub async fn run_event_consumer(
                         ToolCallMessageState {
                             msg_id: sent.id,
                             name: resolved_name,
+                            details: resolved_details,
                         },
                     );
                 }

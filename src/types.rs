@@ -57,11 +57,13 @@ pub enum AgentEvent {
     ToolCall {
         id: String,
         name: String,
+        details: Option<String>,
     },
     ToolCallUpdate {
         id: String,
         name: String,
         output: Option<String>,
+        details: Option<String>,
     },
     Finished(String),
     Error(String),

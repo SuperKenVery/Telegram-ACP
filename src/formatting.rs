@@ -14,20 +14,25 @@ pub fn format_text_message(text: &str) -> String {
 }
 
 /// Format a tool call notification.
-pub fn format_tool_call(name: &str) -> String {
-    format!("🔧 <b>Tool:</b> <code>{}</code>", escape_html(name))
+pub fn format_tool_call(name: &str, details: Option<&str>) -> String {
+    let header = format!("🔧 <b>Tool:</b> <code>{}</code>", escape_html(name));
+    match details {
+        Some(body) => {
+            format!("{header}\n{}", format_collapsible_block(body, 3800))
+        }
+        None => header,
+    }
 }
 
 /// Format a tool call result/update.
-pub fn format_tool_result(name: &str, output: Option<&str>) -> String {
-    match output {
-        Some(out) => {
-            let escaped = escape_html(out);
-            let truncated = truncate_message(&escaped, 3900);
+pub fn format_tool_result(name: &str, output: Option<&str>, details: Option<&str>) -> String {
+    match details.or(output) {
+        Some(body) => {
+            let section = format_collapsible_block(body, 3900);
             format!(
-                "✅ <b>Tool:</b> <code>{}</code>\n<pre>{}</pre>",
+                "✅ <b>Tool:</b> <code>{}</code>\n{}",
                 escape_html(name),
-                truncated
+                section
             )
         }
         None => format!("✅ <b>Tool:</b> <code>{}</code>", escape_html(name)),
@@ -60,6 +65,12 @@ fn truncate_message(text: &str, max_len: usize) -> String {
         let cut = text.floor_char_boundary(cut);
         format!("{}{}", &text[..cut], suffix)
     }
+}
+
+fn format_collapsible_block(text: &str, max_len: usize) -> String {
+    let escaped = escape_html(text);
+    let truncated = truncate_message(&escaped, max_len);
+    format!("<blockquote expandable>{}</blockquote>", truncated)
 }
 
 /// Split a long message into multiple chunks that each fit within Telegram's limit.
