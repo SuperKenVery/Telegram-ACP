@@ -173,6 +173,17 @@ async fn flush_draft(
     }
 }
 
+/// Delete the "Working on it..." indicator message if one exists.
+async fn delete_working_msg(
+    bot: &Bot,
+    chat_id: ChatId,
+    working_msg_id: &mut Option<teloxide::types::MessageId>,
+) {
+    if let Some(msg_id) = working_msg_id.take() {
+        let _ = bot.delete_message(chat_id, msg_id).await;
+    }
+}
+
 /// Consume AgentEvents and send them as Telegram messages in the forum topic.
 /// Consecutive text chunks are streamed via `sendMessageDraft` and finalized
 /// with `sendMessage` when a non-text event arrives or the stream ends.
@@ -185,10 +196,15 @@ pub async fn run_event_consumer(
 ) {
     let mut message_count = 0u32;
     let mut draft: Option<DraftState> = None;
+    // Message ID of the "Working on it..." indicator, to delete when a real event arrives.
+    let mut working_msg_id: Option<teloxide::types::MessageId> = None;
 
     while let Some(event) = event_rx.recv().await {
         match &event {
             AgentEvent::TextMessage(t) => {
+                // Delete the "working" indicator on first real content
+                delete_working_msg(&bot, chat_id, &mut working_msg_id).await;
+
                 // Accumulate text into the current draft, or start a new one
                 let d = draft.get_or_insert_with(|| DraftState {
                     draft_id: rand_draft_id(),
@@ -208,6 +224,11 @@ pub async fn run_event_consumer(
                     message_count += 1;
                 }
             }
+        }
+
+        // Delete the "working" indicator before sending any non-Working event
+        if !matches!(event, AgentEvent::Working) {
+            delete_working_msg(&bot, chat_id, &mut working_msg_id).await;
         }
 
         let (text, is_turn_end) = match &event {
@@ -230,12 +251,19 @@ pub async fn run_event_consumer(
         // Split long messages
         let chunks = formatting::split_message(&text, 4096);
         for chunk in chunks {
-            let _ = bot
-                .send_message(chat_id, chunk)
+            let result = bot
+                .send_message(chat_id, &chunk)
                 .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
                 .parse_mode(ParseMode::Html)
                 .disable_notification(disable_notification)
                 .await;
+
+            // If this is the "Working" message, remember its ID so we can delete it later
+            if matches!(event, AgentEvent::Working) {
+                if let Ok(sent) = result {
+                    working_msg_id = Some(sent.id);
+                }
+            }
         }
 
         // Reset message count after each turn so the next prompt's first message notifies
