@@ -1,5 +1,5 @@
-use agent_client_protocol as acp;
 use acp::Agent;
+use agent_client_protocol as acp;
 use anyhow::Result;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,15 +40,18 @@ impl acp::Client for TelegramClient {
         let option_id = args
             .options
             .iter()
-            .find(|o| matches!(o.kind, acp::PermissionOptionKind::AllowAlways | acp::PermissionOptionKind::AllowOnce))
+            .find(|o| {
+                matches!(
+                    o.kind,
+                    acp::PermissionOptionKind::AllowAlways | acp::PermissionOptionKind::AllowOnce
+                )
+            })
             .or(args.options.first())
             .map(|o| o.option_id.clone())
             .unwrap_or_else(|| acp::PermissionOptionId::new("allow"));
 
         Ok(acp::RequestPermissionResponse::new(
-            acp::RequestPermissionOutcome::Selected(
-                acp::SelectedPermissionOutcome::new(option_id),
-            ),
+            acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(option_id)),
         ))
     }
 
@@ -116,7 +119,11 @@ pub fn spawn_agent(
     project_path: &Path,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
     is_loading: Arc<AtomicBool>,
-) -> Result<(acp::ClientSideConnection, tokio::process::Child, impl std::future::Future<Output = acp::Result<()>>)> {
+) -> Result<(
+    acp::ClientSideConnection,
+    tokio::process::Child,
+    impl std::future::Future<Output = acp::Result<()>>,
+)> {
     let parts: Vec<&str> = agent_cmd.split_whitespace().collect();
     let (program, args) = parts.split_first().unwrap_or((&"claude-agent-acp", &[]));
 
@@ -177,10 +184,16 @@ pub async fn resume_session(
         .await?;
 
     if init_resp.agent_capabilities.load_session {
-        tracing::info!("Agent supports load_session, resuming session {}", old_acp_session_id);
+        tracing::info!(
+            "Agent supports load_session, resuming session {}",
+            old_acp_session_id
+        );
         let session_id = acp::SessionId::new(old_acp_session_id.clone());
         match conn
-            .load_session(acp::LoadSessionRequest::new(old_acp_session_id, project_path))
+            .load_session(acp::LoadSessionRequest::new(
+                old_acp_session_id,
+                project_path,
+            ))
             .await
         {
             Ok(_) => {

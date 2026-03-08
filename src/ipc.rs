@@ -83,8 +83,8 @@ pub async fn send_command(socket_path: &Path, cmd: &DaemonCommand) -> Result<Dae
     let mut line = String::new();
     reader.read_line(&mut line).await?;
 
-    let response: DaemonResponse = serde_json::from_str(line.trim())
-        .context("Failed to parse daemon response")?;
+    let response: DaemonResponse =
+        serde_json::from_str(line.trim()).context("Failed to parse daemon response")?;
 
     Ok(response)
 }

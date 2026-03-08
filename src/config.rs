@@ -27,10 +27,12 @@ impl Config {
     pub fn load() -> Result<Self> {
         let config_path = dirs_config_path();
         let file_config = if config_path.exists() {
-            let contents = std::fs::read_to_string(&config_path)
-                .with_context(|| format!("Failed to read config file: {}", config_path.display()))?;
-            toml::from_str::<FileConfig>(&contents)
-                .with_context(|| format!("Failed to parse config file: {}", config_path.display()))?
+            let contents = std::fs::read_to_string(&config_path).with_context(|| {
+                format!("Failed to read config file: {}", config_path.display())
+            })?;
+            toml::from_str::<FileConfig>(&contents).with_context(|| {
+                format!("Failed to parse config file: {}", config_path.display())
+            })?
         } else {
             FileConfig::default()
         };
@@ -38,20 +40,37 @@ impl Config {
         let bot_token = env_or("TELEGRAM_ACP_BOT_TOKEN", file_config.bot_token)
             .context("bot_token is required (set TELEGRAM_ACP_BOT_TOKEN or config file)")?;
 
-        let chat_id = env_or("TELEGRAM_ACP_CHAT_ID", file_config.chat_id.map(|id| id.to_string()))
-            .context("chat_id is required (set TELEGRAM_ACP_CHAT_ID or config file)")?
-            .parse::<i64>()
-            .context("chat_id must be a valid integer")?;
+        let chat_id = env_or(
+            "TELEGRAM_ACP_CHAT_ID",
+            file_config.chat_id.map(|id| id.to_string()),
+        )
+        .context("chat_id is required (set TELEGRAM_ACP_CHAT_ID or config file)")?
+        .parse::<i64>()
+        .context("chat_id must be a valid integer")?;
 
-        let socket_path = env_or("TELEGRAM_ACP_SOCKET_PATH", file_config.socket_path.map(|p| p.to_string_lossy().into_owned()))
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/tmp/telegram-acp.sock"));
+        let socket_path = env_or(
+            "TELEGRAM_ACP_SOCKET_PATH",
+            file_config
+                .socket_path
+                .map(|p| p.to_string_lossy().into_owned()),
+        )
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp/telegram-acp.sock"));
 
-        let default_agent_command = env_or("TELEGRAM_ACP_AGENT_COMMAND", file_config.default_agent_command)
-            .unwrap_or_else(|| "claude-agent-acp".to_string());
+        let default_agent_command = env_or(
+            "TELEGRAM_ACP_AGENT_COMMAND",
+            file_config.default_agent_command,
+        )
+        .unwrap_or_else(|| "claude-agent-acp".to_string());
 
-        let telegraph_author = env_or("TELEGRAM_ACP_TELEGRAPH_AUTHOR", file_config.telegraph_author);
-        let telegraph_author_url = env_or("TELEGRAM_ACP_TELEGRAPH_AUTHOR_URL", file_config.telegraph_author_url);
+        let telegraph_author = env_or(
+            "TELEGRAM_ACP_TELEGRAPH_AUTHOR",
+            file_config.telegraph_author,
+        );
+        let telegraph_author_url = env_or(
+            "TELEGRAM_ACP_TELEGRAPH_AUTHOR_URL",
+            file_config.telegraph_author_url,
+        );
 
         Ok(Config {
             bot_token,

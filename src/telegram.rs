@@ -1,7 +1,8 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use teloxide::prelude::*;
-use teloxide::types::{ParseMode, ThreadId};
+use teloxide::types::{MessageId, ParseMode, ThreadId};
 use tokio::sync::mpsc;
 
 use crate::daemon::DaemonHandle;
@@ -46,8 +47,7 @@ pub async fn run_bot(bot: Bot, daemon: Arc<DaemonHandle>) {
     use teloxide::dptree;
     use teloxide::types::Update;
 
-    let handler = dptree::entry()
-        .branch(Update::filter_message().endpoint(handle_message));
+    let handler = dptree::entry().branch(Update::filter_message().endpoint(handle_message));
 
     Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![daemon])
@@ -58,11 +58,7 @@ pub async fn run_bot(bot: Bot, daemon: Arc<DaemonHandle>) {
 }
 
 /// Handle an incoming Telegram message.
-async fn handle_message(
-    bot: Bot,
-    msg: Message,
-    daemon: Arc<DaemonHandle>,
-) -> anyhow::Result<()> {
+async fn handle_message(bot: Bot, msg: Message, daemon: Arc<DaemonHandle>) -> anyhow::Result<()> {
     let text = match msg.text() {
         Some(t) => t,
         None => return Ok(()),
@@ -147,6 +143,12 @@ struct DraftState {
     text: String,
 }
 
+/// Tracks which Telegram message corresponds to a tool call id.
+struct ToolCallMessageState {
+    msg_id: MessageId,
+    name: String,
+}
+
 /// Flush the accumulated draft text as a finalized `sendMessage`.
 /// Clears the draft state. Returns Ok(()) even if sending fails (logs error).
 async fn flush_draft(
@@ -196,6 +198,7 @@ pub async fn run_event_consumer(
 ) {
     let mut message_count = 0u32;
     let mut draft: Option<DraftState> = None;
+    let mut tool_call_messages: HashMap<String, ToolCallMessageState> = HashMap::new();
     // Message ID of the "Working on it..." indicator, to delete when a real event arrives.
     let mut working_msg_id: Option<teloxide::types::MessageId> = None;
 
@@ -231,44 +234,116 @@ pub async fn run_event_consumer(
             delete_working_msg(&bot, chat_id, &mut working_msg_id).await;
         }
 
-        let (text, is_turn_end) = match &event {
-            AgentEvent::Working => ("⏳ <i>Working on it...</i>".to_string(), false),
-            AgentEvent::TextMessage(_) => unreachable!(),
-            AgentEvent::ToolCall { name, .. } => (formatting::format_tool_call(name), false),
-            AgentEvent::ToolCallUpdate { name, output, .. } => {
-                (formatting::format_tool_result(name, output.as_deref()), false)
-            }
-            AgentEvent::Finished(reason) => {
-                (formatting::format_completion(reason, None), true)
-            }
-            AgentEvent::Error(e) => (formatting::format_error(e), true),
-        };
-
-        // Notification logic: first message and final message notify, others silent
-        let disable_notification = message_count > 0 && !is_turn_end;
-        message_count += 1;
-
-        // Split long messages
-        let chunks = formatting::split_message(&text, 4096);
-        for chunk in chunks {
-            let result = bot
-                .send_message(chat_id, &chunk)
-                .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
-                .parse_mode(ParseMode::Html)
-                .disable_notification(disable_notification)
-                .await;
-
-            // If this is the "Working" message, remember its ID so we can delete it later
-            if matches!(event, AgentEvent::Working) {
+        match &event {
+            AgentEvent::Working => {
+                let text = "⏳ <i>Working on it...</i>".to_string();
+                let disable_notification = message_count > 0;
+                message_count += 1;
+                let result = bot
+                    .send_message(chat_id, &text)
+                    .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
+                    .parse_mode(ParseMode::Html)
+                    .disable_notification(disable_notification)
+                    .await;
                 if let Ok(sent) = result {
                     working_msg_id = Some(sent.id);
                 }
             }
-        }
+            AgentEvent::TextMessage(_) => unreachable!(),
+            AgentEvent::ToolCall { id, name } => {
+                let text = formatting::format_tool_call(name);
+                let disable_notification = message_count > 0;
+                message_count += 1;
+                if let Ok(sent) = bot
+                    .send_message(chat_id, &text)
+                    .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
+                    .parse_mode(ParseMode::Html)
+                    .disable_notification(disable_notification)
+                    .await
+                {
+                    tool_call_messages.insert(
+                        id.clone(),
+                        ToolCallMessageState {
+                            msg_id: sent.id,
+                            name: name.clone(),
+                        },
+                    );
+                }
+            }
+            AgentEvent::ToolCallUpdate { id, name, output } => {
+                let resolved_name = if !name.is_empty() {
+                    name.clone()
+                } else {
+                    tool_call_messages
+                        .get(id)
+                        .map(|s| s.name.clone())
+                        .unwrap_or_default()
+                };
+                let text = formatting::format_tool_result(&resolved_name, output.as_deref());
 
-        // Reset message count after each turn so the next prompt's first message notifies
-        if is_turn_end {
-            message_count = 0;
+                if let Some(state) = tool_call_messages.get_mut(id) {
+                    if bot
+                        .edit_message_text(chat_id, state.msg_id, text.clone())
+                        .parse_mode(ParseMode::Html)
+                        .await
+                        .is_ok()
+                    {
+                        if !name.is_empty() {
+                            state.name = name.clone();
+                        }
+                        continue;
+                    }
+                }
+
+                // Fallback: if edit fails or we don't have prior tool-call message, send a new one.
+                let disable_notification = message_count > 0;
+                message_count += 1;
+                if let Ok(sent) = bot
+                    .send_message(chat_id, &text)
+                    .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
+                    .parse_mode(ParseMode::Html)
+                    .disable_notification(disable_notification)
+                    .await
+                {
+                    tool_call_messages.insert(
+                        id.clone(),
+                        ToolCallMessageState {
+                            msg_id: sent.id,
+                            name: resolved_name,
+                        },
+                    );
+                }
+            }
+            AgentEvent::Finished(reason) => {
+                let text = formatting::format_completion(reason, None);
+                let chunks = formatting::split_message(&text, 4096);
+                let disable_notification = false;
+                for chunk in chunks {
+                    let _ = bot
+                        .send_message(chat_id, &chunk)
+                        .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
+                        .parse_mode(ParseMode::Html)
+                        .disable_notification(disable_notification)
+                        .await;
+                }
+                message_count = 0;
+                tool_call_messages.clear();
+            }
+            AgentEvent::Error(e) => {
+                let text = formatting::format_error(e);
+                let chunks = formatting::split_message(&text, 4096);
+                let disable_notification = false;
+                for chunk in chunks {
+                    let _ = bot
+                        .send_message(chat_id, &chunk)
+                        .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
+                        .parse_mode(ParseMode::Html)
+                        .disable_notification(disable_notification)
+                        .await;
+                }
+                message_count = 0;
+                tool_call_messages.clear();
+            }
         }
     }
 

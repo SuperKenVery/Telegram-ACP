@@ -1,5 +1,5 @@
-use agent_client_protocol as acp;
 use acp::Agent;
+use agent_client_protocol as acp;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 

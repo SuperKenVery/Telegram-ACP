@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use dashmap::DashMap;
-use teloxide::prelude::*;
 use telegraph_rs::Telegraph;
+use teloxide::prelude::*;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::acp;
@@ -49,7 +49,10 @@ pub struct SessionEntry {
 }
 
 impl DaemonHandle {
-    pub fn get_session_tx_by_thread(&self, thread_id: i32) -> Option<mpsc::UnboundedSender<String>> {
+    pub fn get_session_tx_by_thread(
+        &self,
+        thread_id: i32,
+    ) -> Option<mpsc::UnboundedSender<String>> {
         self.sessions.get(&thread_id).map(|e| e.user_tx.clone())
     }
 
@@ -169,10 +172,7 @@ impl DaemonHandle {
         let bot = self.bot.clone();
         let chat_id = ChatId(self.config.chat_id);
         tokio::spawn(telegram::run_event_consumer(
-            bot,
-            chat_id,
-            thread_id,
-            event_rx,
+            bot, chat_id, thread_id, event_rx,
         ));
 
         // Create oneshot for receiving the ACP session ID
@@ -361,11 +361,7 @@ pub async fn run_daemon(config: Config) -> Result<()> {
                         prompt,
                         agent,
                     } => match daemon
-                        .spawn_session(
-                            path.to_string_lossy().to_string(),
-                            prompt,
-                            agent,
-                        )
+                        .spawn_session(path.to_string_lossy().to_string(), prompt, agent)
                         .await
                     {
                         Ok((acp_session_id, thread_id)) => DaemonResponse::SessionCreated {

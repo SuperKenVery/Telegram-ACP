@@ -7,8 +7,8 @@
 //! 4. Sends a summary text message
 //! 5. Returns with StopReason::EndTurn
 
-use agent_client_protocol as acp;
 use acp::Client; // needed to call session_notification on AgentSideConnection
+use agent_client_protocol as acp;
 use std::cell::OnceCell;
 use std::rc::Rc;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -23,13 +23,9 @@ impl acp::Agent for MockAgent {
         &self,
         _args: acp::InitializeRequest,
     ) -> acp::Result<acp::InitializeResponse> {
-        Ok(
-            acp::InitializeResponse::new(acp::ProtocolVersion::V1)
-                .agent_info(
-                    acp::Implementation::new("mock-agent", "0.1.0").title("Mock Agent"),
-                )
-                .agent_capabilities(acp::AgentCapabilities::new()),
-        )
+        Ok(acp::InitializeResponse::new(acp::ProtocolVersion::V1)
+            .agent_info(acp::Implementation::new("mock-agent", "0.1.0").title("Mock Agent"))
+            .agent_capabilities(acp::AgentCapabilities::new()))
     }
 
     async fn authenticate(
@@ -67,9 +63,7 @@ impl acp::Agent for MockAgent {
         send_text(
             conn,
             &sid,
-            &format!(
-                "Hello! I received your prompt: \"{prompt_text}\"\n\nLet me work on that."
-            ),
+            &format!("Hello! I received your prompt: \"{prompt_text}\"\n\nLet me work on that."),
         )
         .await;
 
@@ -164,9 +158,9 @@ impl acp::Agent for MockAgent {
 async fn send_text(conn: &acp::AgentSideConnection, sid: &acp::SessionId, text: &str) {
     conn.session_notification(acp::SessionNotification::new(
         sid.clone(),
-        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
-            acp::ContentBlock::from(text.to_string()),
-        )),
+        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(acp::ContentBlock::from(
+            text.to_string(),
+        ))),
     ))
     .await
     .ok();
