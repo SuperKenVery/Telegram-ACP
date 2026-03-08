@@ -26,6 +26,7 @@ async fn send_message_draft(
         "chat_id": chat_id.0,
         "draft_id": draft_id,
         "text": text,
+        "parse_mode": "MarkdownV2",
     });
 
     if thread_id != 0 {
@@ -39,6 +40,16 @@ async fn send_message_draft(
         anyhow::bail!("sendMessageDraft failed ({status}): {body_text}");
     }
     Ok(())
+}
+
+fn fix_md_for_telegram(text: &str) -> String {
+    match telegram_markdown_v2::convert(text) {
+        Ok(converted) => converted.trim_end_matches('\n').to_string(),
+        Err(e) => {
+            tracing::warn!("telegram_markdown_v2 conversion failed, using escaped fallback: {e}");
+            formatting::escape_markdown_v2(text)
+        }
+    }
 }
 
 /// Start the Telegram bot dispatcher. Runs until cancelled.
@@ -100,11 +111,11 @@ async fn handle_new_command(
     {
         Ok((acp_session_id, thread_id)) => {
             let reply = format!(
-                "Session <code>{}</code> created in topic.",
-                formatting::escape_html(&acp_session_id)
+                "Session `{}` created in topic\\.",
+                formatting::escape_markdown_v2(&acp_session_id)
             );
             bot.send_message(msg.chat.id, reply)
-                .parse_mode(ParseMode::Html)
+                .parse_mode(ParseMode::MarkdownV2)
                 .await?;
 
             // If there's an initial prompt, send it to the session
@@ -166,12 +177,41 @@ async fn flush_draft(
         let formatted = formatting::format_text_message(&d.text);
         let chunks = formatting::split_message(&formatted, 4096);
         for chunk in chunks {
-            let _ = bot
-                .send_message(chat_id, chunk)
+            let send_result = bot
+                .send_message(chat_id, chunk.clone())
                 .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
-                .parse_mode(ParseMode::Html)
+                .parse_mode(ParseMode::MarkdownV2)
                 .disable_notification(disable_notification)
                 .await;
+
+            // If agent-provided MarkdownV2 is invalid, retry with escaped plain text
+            // so content is never dropped when the draft is finalized.
+            if let Err(e) = send_result {
+                tracing::warn!(
+                    chat_id = chat_id.0,
+                    thread_id = thread_id,
+                    chunk_len = chunk.len(),
+                    "Failed to send finalized draft chunk as MarkdownV2: {e}"
+                );
+                let safe_text = formatting::escape_markdown_v2(&chunk);
+                let safe_chunks = formatting::split_message(&safe_text, 4096);
+                for safe_chunk in safe_chunks {
+                    if let Err(e) = bot
+                        .send_message(chat_id, safe_chunk)
+                        .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
+                        .parse_mode(ParseMode::MarkdownV2)
+                        .disable_notification(disable_notification)
+                        .await
+                    {
+                        tracing::warn!(
+                            chat_id = chat_id.0,
+                            thread_id = thread_id,
+                            "Failed to send escaped finalized draft chunk fallback: {e}"
+                        );
+                    }
+                }
+                break;
+            }
         }
     }
 }
@@ -217,7 +257,19 @@ pub async fn run_event_consumer(
                 d.text.push_str(t);
 
                 // Stream the partial text via sendMessageDraft (best-effort)
-                let _ = send_message_draft(&bot, chat_id, thread_id, d.draft_id, &d.text).await;
+                let escaped_draft_text = fix_md_for_telegram(&d.text);
+                if let Err(e) =
+                    send_message_draft(&bot, chat_id, thread_id, d.draft_id, &escaped_draft_text)
+                        .await
+                {
+                    tracing::warn!(
+                        chat_id = chat_id.0,
+                        thread_id = thread_id,
+                        draft_id = d.draft_id,
+                        text_len = d.text.len(),
+                        "sendMessageDraft failed: {e}"
+                    );
+                }
                 continue;
             }
             _ => {
@@ -237,13 +289,13 @@ pub async fn run_event_consumer(
 
         match &event {
             AgentEvent::Working => {
-                let text = "⏳ <i>Working on it...</i>".to_string();
+                let text = "⏳ _Working on it\\.\\.\\._".to_string();
                 let disable_notification = message_count > 0;
                 message_count += 1;
                 let result = bot
                     .send_message(chat_id, &text)
                     .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
-                    .parse_mode(ParseMode::Html)
+                    .parse_mode(ParseMode::MarkdownV2)
                     .disable_notification(disable_notification)
                     .await;
                 if let Ok(sent) = result {
@@ -258,7 +310,7 @@ pub async fn run_event_consumer(
                 if let Ok(sent) = bot
                     .send_message(chat_id, &text)
                     .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
-                    .parse_mode(ParseMode::Html)
+                    .parse_mode(ParseMode::MarkdownV2)
                     .disable_notification(disable_notification)
                     .await
                 {
@@ -300,7 +352,7 @@ pub async fn run_event_consumer(
                 if let Some(state) = tool_call_messages.get_mut(id) {
                     if bot
                         .edit_message_text(chat_id, state.msg_id, text.clone())
-                        .parse_mode(ParseMode::Html)
+                        .parse_mode(ParseMode::MarkdownV2)
                         .await
                         .is_ok()
                     {
@@ -320,7 +372,7 @@ pub async fn run_event_consumer(
                 if let Ok(sent) = bot
                     .send_message(chat_id, &text)
                     .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
-                    .parse_mode(ParseMode::Html)
+                    .parse_mode(ParseMode::MarkdownV2)
                     .disable_notification(disable_notification)
                     .await
                 {
@@ -342,7 +394,7 @@ pub async fn run_event_consumer(
                     let _ = bot
                         .send_message(chat_id, &chunk)
                         .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
-                        .parse_mode(ParseMode::Html)
+                        .parse_mode(ParseMode::MarkdownV2)
                         .disable_notification(disable_notification)
                         .await;
                 }
@@ -357,7 +409,7 @@ pub async fn run_event_consumer(
                     let _ = bot
                         .send_message(chat_id, &chunk)
                         .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
-                        .parse_mode(ParseMode::Html)
+                        .parse_mode(ParseMode::MarkdownV2)
                         .disable_notification(disable_notification)
                         .await;
                 }

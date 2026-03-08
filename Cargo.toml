@@ -16,6 +16,7 @@ serde_json = "1"
 similar = "2"
 telegraph-rs = "0.6"
 teloxide = { version = "0.13", features = ["macros"] }
+telegram-markdown-v2 = "0.2"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
