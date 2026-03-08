@@ -8,6 +8,38 @@ use crate::daemon::DaemonHandle;
 use crate::formatting;
 use crate::types::AgentEvent;
 
+/// Send a message draft (streaming partial text) via the raw Telegram Bot API.
+/// Uses `sendMessageDraft` (Bot API 9.3+). Returns Ok(()) on success.
+async fn send_message_draft(
+    bot: &Bot,
+    chat_id: ChatId,
+    thread_id: i32,
+    draft_id: i64,
+    text: &str,
+) -> anyhow::Result<()> {
+    let client = bot.client();
+    let token = bot.token();
+    let url = format!("https://api.telegram.org/bot{token}/sendMessageDraft");
+
+    let mut body = serde_json::json!({
+        "chat_id": chat_id.0,
+        "draft_id": draft_id,
+        "text": text,
+    });
+
+    if thread_id != 0 {
+        body["message_thread_id"] = serde_json::json!(thread_id);
+    }
+
+    let resp = client.post(&url).json(&body).send().await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body_text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("sendMessageDraft failed ({status}): {body_text}");
+    }
+    Ok(())
+}
+
 /// Start the Telegram bot dispatcher. Runs until cancelled.
 pub async fn run_bot(bot: Bot, daemon: Arc<DaemonHandle>) {
     use teloxide::dispatching::{Dispatcher, UpdateFilterExt};
@@ -112,7 +144,41 @@ async fn handle_topic_message(
     Ok(())
 }
 
+/// State for an in-progress text draft being streamed.
+struct DraftState {
+    draft_id: i64,
+    text: String,
+}
+
+/// Flush the accumulated draft text as a finalized `sendMessage`.
+/// Clears the draft state. Returns Ok(()) even if sending fails (logs error).
+async fn flush_draft(
+    bot: &Bot,
+    chat_id: ChatId,
+    thread_id: i32,
+    draft: &mut Option<DraftState>,
+    disable_notification: bool,
+) {
+    if let Some(d) = draft.take() {
+        if d.text.is_empty() {
+            return;
+        }
+        let formatted = formatting::format_text_message(&d.text);
+        let chunks = formatting::split_message(&formatted, 4096);
+        for chunk in chunks {
+            let _ = bot
+                .send_message(chat_id, chunk)
+                .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
+                .parse_mode(ParseMode::Html)
+                .disable_notification(disable_notification)
+                .await;
+        }
+    }
+}
+
 /// Consume AgentEvents and send them as Telegram messages in the forum topic.
+/// Consecutive text chunks are streamed via `sendMessageDraft` and finalized
+/// with `sendMessage` when a non-text event arrives or the stream ends.
 pub async fn run_event_consumer(
     bot: Bot,
     chat_id: ChatId,
@@ -120,11 +186,35 @@ pub async fn run_event_consumer(
     mut event_rx: mpsc::UnboundedReceiver<AgentEvent>,
 ) {
     let mut message_count = 0u32;
+    let mut draft: Option<DraftState> = None;
 
     while let Some(event) = event_rx.recv().await {
+        match &event {
+            AgentEvent::TextMessage(t) => {
+                // Accumulate text into the current draft, or start a new one
+                let d = draft.get_or_insert_with(|| DraftState {
+                    draft_id: rand_draft_id(),
+                    text: String::new(),
+                });
+                d.text.push_str(t);
+
+                // Stream the partial text via sendMessageDraft (best-effort)
+                let _ = send_message_draft(&bot, chat_id, thread_id, d.draft_id, &d.text).await;
+                continue;
+            }
+            _ => {
+                // Non-text event: flush any accumulated draft first
+                let disable_notification = message_count > 0;
+                flush_draft(&bot, chat_id, thread_id, &mut draft, disable_notification).await;
+                if message_count == 0 {
+                    message_count += 1;
+                }
+            }
+        }
+
         let (text, is_final) = match &event {
             AgentEvent::Working => ("⏳ <i>Working on it...</i>".to_string(), false),
-            AgentEvent::TextMessage(t) => (formatting::format_text_message(t), false),
+            AgentEvent::TextMessage(_) => unreachable!(),
             AgentEvent::ToolCall { name, .. } => (formatting::format_tool_call(name), false),
             AgentEvent::ToolCallUpdate { name, output, .. } => {
                 (formatting::format_tool_result(name, output.as_deref()), false)
@@ -151,11 +241,23 @@ pub async fn run_event_consumer(
         }
 
         if is_final {
-            // Close the forum topic
             let _ = bot
                 .close_forum_topic(chat_id, ThreadId(teloxide::types::MessageId(thread_id)))
                 .await;
             break;
         }
     }
+
+    // Channel closed — flush any remaining draft
+    flush_draft(&bot, chat_id, thread_id, &mut draft, true).await;
+}
+
+/// Generate a random i64 to use as a draft_id.
+fn rand_draft_id() -> i64 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let s = RandomState::new();
+    let mut h = s.build_hasher();
+    h.write_u8(0);
+    h.finish() as i64
 }
