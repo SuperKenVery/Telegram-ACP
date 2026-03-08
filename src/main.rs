@@ -3,6 +3,7 @@ mod config;
 mod daemon;
 mod formatting;
 mod ipc;
+mod persistence;
 mod session;
 mod telegram;
 #[allow(dead_code)]
@@ -70,10 +71,10 @@ async fn main() -> anyhow::Result<()> {
             let response = ipc::send_command(&config.socket_path, &cmd).await?;
             match response {
                 types::DaemonResponse::SessionCreated {
-                    session_id,
+                    acp_session_id,
                     topic_url,
                 } => {
-                    println!("Session created: {session_id}");
+                    println!("Session created: {acp_session_id}");
                     println!("Topic: {topic_url}");
                 }
                 types::DaemonResponse::Error { message } => {
@@ -98,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
                         for s in sessions {
                             println!(
                                 "{} | {} | {:?} | thread:{}",
-                                s.session_id,
+                                s.acp_session_id,
                                 s.project_path.display(),
                                 s.status,
                                 s.thread_id

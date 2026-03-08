@@ -2,6 +2,8 @@ use agent_client_protocol as acp;
 use acp::Agent;
 use anyhow::Result;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
@@ -11,11 +13,16 @@ use crate::types::AgentEvent;
 /// Our ACP Client implementation that forwards agent notifications as AgentEvents.
 pub struct TelegramClient {
     event_tx: mpsc::UnboundedSender<AgentEvent>,
+    /// When true, session_notification is a no-op (suppresses replay during load).
+    pub is_loading: Arc<AtomicBool>,
 }
 
 impl TelegramClient {
-    pub fn new(event_tx: mpsc::UnboundedSender<AgentEvent>) -> Self {
-        Self { event_tx }
+    pub fn new(event_tx: mpsc::UnboundedSender<AgentEvent>, is_loading: Arc<AtomicBool>) -> Self {
+        Self {
+            event_tx,
+            is_loading,
+        }
     }
 
     fn send_event(&self, event: AgentEvent) {
@@ -46,6 +53,10 @@ impl acp::Client for TelegramClient {
     }
 
     async fn session_notification(&self, args: acp::SessionNotification) -> acp::Result<()> {
+        if self.is_loading.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
         match args.update {
             acp::SessionUpdate::AgentMessageChunk(chunk) => {
                 let text = extract_text(&chunk.content);
@@ -104,6 +115,7 @@ pub fn spawn_agent(
     agent_cmd: &str,
     project_path: &Path,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
+    is_loading: Arc<AtomicBool>,
 ) -> Result<(acp::ClientSideConnection, tokio::process::Child, impl std::future::Future<Output = acp::Result<()>>)> {
     let parts: Vec<&str> = agent_cmd.split_whitespace().collect();
     let (program, args) = parts.split_first().unwrap_or((&"claude-agent-acp", &[]));
@@ -120,7 +132,7 @@ pub fn spawn_agent(
     let stdin = child.stdin.take().unwrap().compat_write();
     let stdout = child.stdout.take().unwrap().compat();
 
-    let client = TelegramClient::new(event_tx);
+    let client = TelegramClient::new(event_tx, is_loading);
 
     let (conn, handle_io) = acp::ClientSideConnection::new(client, stdin, stdout, |fut| {
         tokio::task::spawn_local(fut);
@@ -147,4 +159,50 @@ pub async fn init_session(
         .await?;
 
     Ok(session_resp.session_id)
+}
+
+/// Resume a previous ACP session using load_session if supported, otherwise fall back to new_session.
+pub async fn resume_session(
+    conn: &acp::ClientSideConnection,
+    project_path: &Path,
+    old_acp_session_id: String,
+) -> Result<acp::SessionId> {
+    let init_resp = conn
+        .initialize(
+            acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_info(
+                acp::Implementation::new("telegram-acp", env!("CARGO_PKG_VERSION"))
+                    .title("Telegram ACP"),
+            ),
+        )
+        .await?;
+
+    if init_resp.agent_capabilities.load_session {
+        tracing::info!("Agent supports load_session, resuming session {}", old_acp_session_id);
+        let session_id = acp::SessionId::new(old_acp_session_id.clone());
+        match conn
+            .load_session(acp::LoadSessionRequest::new(old_acp_session_id, project_path))
+            .await
+        {
+            Ok(_) => {
+                // load_session succeeded — reuse the same session ID
+                Ok(session_id)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "load_session failed for {}, falling back to new_session: {e}",
+                    session_id
+                );
+                let session_resp = conn
+                    .new_session(acp::NewSessionRequest::new(project_path))
+                    .await?;
+                Ok(session_resp.session_id)
+            }
+        }
+    } else {
+        tracing::info!("Agent does not support load_session, creating new session");
+        let session_resp = conn
+            .new_session(acp::NewSessionRequest::new(project_path))
+            .await?;
+        Ok(session_resp.session_id)
+    }
 }

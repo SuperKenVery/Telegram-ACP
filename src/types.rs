@@ -18,7 +18,7 @@ pub enum DaemonCommand {
 #[serde(tag = "type")]
 pub enum DaemonResponse {
     SessionCreated {
-        session_id: String,
+        acp_session_id: String,
         topic_url: String,
     },
     SessionList {
@@ -31,10 +31,11 @@ pub enum DaemonResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionInfo {
-    pub session_id: String,
+    pub acp_session_id: String,
     pub project_path: PathBuf,
     pub status: SessionStatus,
     pub thread_id: i32,
+    pub agent_command: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

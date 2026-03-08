@@ -102,10 +102,10 @@ async fn handle_new_command(
         .spawn_session(path.to_string(), prompt.clone(), None)
         .await
     {
-        Ok((session_id, _thread_id)) => {
+        Ok((acp_session_id, thread_id)) => {
             let reply = format!(
                 "Session <code>{}</code> created in topic.",
-                formatting::escape_html(&session_id)
+                formatting::escape_html(&acp_session_id)
             );
             bot.send_message(msg.chat.id, reply)
                 .parse_mode(ParseMode::Html)
@@ -113,7 +113,7 @@ async fn handle_new_command(
 
             // If there's an initial prompt, send it to the session
             if let Some(prompt_text) = prompt {
-                if let Some(user_tx) = daemon.get_session_tx(&session_id) {
+                if let Some(user_tx) = daemon.get_session_tx_by_thread(thread_id) {
                     let _ = user_tx.send(prompt_text);
                 }
             }
@@ -135,11 +135,8 @@ async fn handle_topic_message(
     thread_id: ThreadId,
     daemon: &DaemonHandle,
 ) -> anyhow::Result<()> {
-    if let Some(session_id) = daemon.thread_to_session.get(&thread_id.0 .0) {
-        let session_id = session_id.value().clone();
-        if let Some(user_tx) = daemon.get_session_tx(&session_id) {
-            let _ = user_tx.send(text.to_string());
-        }
+    if let Some(user_tx) = daemon.get_session_tx_by_thread(thread_id.0 .0) {
+        let _ = user_tx.send(text.to_string());
     }
     Ok(())
 }
@@ -179,6 +176,7 @@ async fn flush_draft(
 /// Consume AgentEvents and send them as Telegram messages in the forum topic.
 /// Consecutive text chunks are streamed via `sendMessageDraft` and finalized
 /// with `sendMessage` when a non-text event arrives or the stream ends.
+/// Runs until the event channel is closed (i.e., the session ends).
 pub async fn run_event_consumer(
     bot: Bot,
     chat_id: ChatId,
@@ -212,7 +210,7 @@ pub async fn run_event_consumer(
             }
         }
 
-        let (text, is_final) = match &event {
+        let (text, is_turn_end) = match &event {
             AgentEvent::Working => ("⏳ <i>Working on it...</i>".to_string(), false),
             AgentEvent::TextMessage(_) => unreachable!(),
             AgentEvent::ToolCall { name, .. } => (formatting::format_tool_call(name), false),
@@ -226,7 +224,7 @@ pub async fn run_event_consumer(
         };
 
         // Notification logic: first message and final message notify, others silent
-        let disable_notification = message_count > 0 && !is_final;
+        let disable_notification = message_count > 0 && !is_turn_end;
         message_count += 1;
 
         // Split long messages
@@ -240,16 +238,17 @@ pub async fn run_event_consumer(
                 .await;
         }
 
-        if is_final {
-            let _ = bot
-                .close_forum_topic(chat_id, ThreadId(teloxide::types::MessageId(thread_id)))
-                .await;
-            break;
+        // Reset message count after each turn so the next prompt's first message notifies
+        if is_turn_end {
+            message_count = 0;
         }
     }
 
-    // Channel closed — flush any remaining draft
+    // Channel closed — session is done. Flush any remaining draft and close the topic.
     flush_draft(&bot, chat_id, thread_id, &mut draft, true).await;
+    let _ = bot
+        .close_forum_topic(chat_id, ThreadId(teloxide::types::MessageId(thread_id)))
+        .await;
 }
 
 /// Generate a random i64 to use as a draft_id.

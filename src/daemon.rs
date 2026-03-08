@@ -1,14 +1,16 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
 use dashmap::DashMap;
 use teloxide::prelude::*;
 use telegraph_rs::Telegraph;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::acp;
 use crate::config::Config;
+use crate::persistence;
 use crate::session;
 use crate::telegram;
 use crate::types::{AgentEvent, SessionInfo, SessionStatus};
@@ -20,7 +22,10 @@ struct SpawnLocalRequest {
     event_tx: mpsc::UnboundedSender<AgentEvent>,
     user_rx: mpsc::UnboundedReceiver<String>,
     status: Arc<tokio::sync::Mutex<SessionStatus>>,
-    session_id: String,
+    /// If Some, resume this ACP session instead of creating a new one.
+    existing_acp_session_id: Option<String>,
+    /// Sends back the ACP session ID (or error) after init completes.
+    result_tx: oneshot::Sender<Result<String>>,
 }
 
 /// Shared daemon state, accessible from Telegram handlers and IPC.
@@ -29,25 +34,23 @@ pub struct DaemonHandle {
     pub bot: Bot,
     #[allow(dead_code)]
     pub telegraph: Telegraph,
-    /// session_id -> AgentSession metadata + user_tx
-    pub sessions: DashMap<String, SessionEntry>,
-    /// thread_id (i32) -> session_id
-    pub thread_to_session: DashMap<i32, String>,
+    /// thread_id -> SessionEntry
+    pub sessions: DashMap<i32, SessionEntry>,
     /// Channel to relay spawn_local work into the LocalSet.
     spawn_tx: mpsc::UnboundedSender<SpawnLocalRequest>,
 }
 
 pub struct SessionEntry {
-    pub session_id: String,
+    pub acp_session_id: String,
     pub project_path: PathBuf,
-    pub thread_id: i32,
+    pub agent_command: String,
     pub status: Arc<tokio::sync::Mutex<SessionStatus>>,
     pub user_tx: mpsc::UnboundedSender<String>,
 }
 
 impl DaemonHandle {
-    pub fn get_session_tx(&self, session_id: &str) -> Option<mpsc::UnboundedSender<String>> {
-        self.sessions.get(session_id).map(|e| e.user_tx.clone())
+    pub fn get_session_tx_by_thread(&self, thread_id: i32) -> Option<mpsc::UnboundedSender<String>> {
+        self.sessions.get(&thread_id).map(|e| e.user_tx.clone())
     }
 
     pub async fn list_sessions(&self) -> Vec<SessionInfo> {
@@ -55,37 +58,48 @@ impl DaemonHandle {
             .sessions
             .iter()
             .map(|entry| {
+                let thread_id = *entry.key();
                 let e = entry.value();
                 (
-                    e.session_id.clone(),
+                    e.acp_session_id.clone(),
                     e.project_path.clone(),
+                    e.agent_command.clone(),
                     e.status.clone(),
-                    e.thread_id,
+                    thread_id,
                 )
             })
             .collect();
 
         let mut result = Vec::with_capacity(entries.len());
-        for (session_id, project_path, status, thread_id) in entries {
+        for (acp_session_id, project_path, agent_command, status, thread_id) in entries {
             let status = *status.lock().await;
             result.push(SessionInfo {
-                session_id,
+                acp_session_id,
                 project_path,
                 status,
                 thread_id,
+                agent_command,
             });
         }
         result
     }
 
+    /// Persist current sessions to disk.
+    pub async fn persist_sessions(&self) {
+        let sessions = self.list_sessions().await;
+        if let Err(e) = persistence::save_sessions(&sessions) {
+            tracing::error!("Failed to persist sessions: {e}");
+        }
+    }
+
     /// Spawn a new agent session: create topic, spawn agent, wire everything up.
+    /// Waits for ACP init to complete before returning.
     pub async fn spawn_session(
         &self,
         path: String,
         _prompt: Option<String>,
         agent_cmd: Option<String>,
     ) -> Result<(String, i32)> {
-        let session_id = uuid::Uuid::new_v4().to_string();
         let project_path = PathBuf::from(&path);
         let agent_cmd = agent_cmd.unwrap_or_else(|| self.config.default_agent_command.clone());
 
@@ -100,25 +114,56 @@ impl DaemonHandle {
             .await?;
         let thread_id = topic.thread_id.0 .0;
 
+        let acp_session_id = self
+            .start_session(thread_id, project_path, agent_cmd, None)
+            .await?;
+
+        Ok((acp_session_id, thread_id))
+    }
+
+    /// Restore a previously persisted session. Skips topic creation since the topic already exists.
+    pub async fn restore_session(&self, info: &SessionInfo) -> Result<()> {
+        let acp_session_id = self
+            .start_session(
+                info.thread_id,
+                info.project_path.clone(),
+                info.agent_command.clone(),
+                Some(info.acp_session_id.clone()),
+            )
+            .await?;
+
+        // Reopen the topic in case it was closed
+        let _ = self
+            .bot
+            .reopen_forum_topic(
+                ChatId(self.config.chat_id),
+                teloxide::types::ThreadId(teloxide::types::MessageId(info.thread_id)),
+            )
+            .await;
+
+        tracing::info!(
+            "Restored session {} (thread {}, acp {})",
+            info.project_path.display(),
+            info.thread_id,
+            acp_session_id
+        );
+        Ok(())
+    }
+
+    /// Common logic for starting a session (new or restored).
+    /// Spawns event consumer, sends SpawnLocalRequest, waits for ACP init, inserts into DashMap.
+    async fn start_session(
+        &self,
+        thread_id: i32,
+        project_path: PathBuf,
+        agent_cmd: String,
+        existing_acp_session_id: Option<String>,
+    ) -> Result<String> {
         // Channels
         let (user_tx, user_rx) = mpsc::unbounded_channel::<String>();
         let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentEvent>();
 
         let status = Arc::new(tokio::sync::Mutex::new(SessionStatus::Initializing));
-
-        // Store session
-        self.sessions.insert(
-            session_id.clone(),
-            SessionEntry {
-                session_id: session_id.clone(),
-                project_path: project_path.clone(),
-                thread_id,
-                status: status.clone(),
-                user_tx: user_tx.clone(),
-            },
-        );
-        self.thread_to_session
-            .insert(thread_id, session_id.clone());
 
         // Spawn the event consumer (sends AgentEvents to Telegram) — regular tokio::spawn is fine
         let bot = self.bot.clone();
@@ -130,29 +175,103 @@ impl DaemonHandle {
             event_rx,
         ));
 
+        // Create oneshot for receiving the ACP session ID
+        let (result_tx, result_rx) = oneshot::channel();
+
         // Relay the agent spawn to the LocalSet via channel
         self.spawn_tx.send(SpawnLocalRequest {
-            agent_cmd,
-            project_path,
+            agent_cmd: agent_cmd.clone(),
+            project_path: project_path.clone(),
             event_tx,
             user_rx,
-            status,
-            session_id: session_id.clone(),
+            status: status.clone(),
+            existing_acp_session_id,
+            result_tx,
         })?;
 
-        Ok((session_id, thread_id))
+        // Wait for ACP init to complete
+        let acp_session_id = result_rx.await??;
+
+        // Store session
+        self.sessions.insert(
+            thread_id,
+            SessionEntry {
+                acp_session_id: acp_session_id.clone(),
+                project_path,
+                agent_command: agent_cmd,
+                status,
+                user_tx,
+            },
+        );
+
+        // Persist after successful init
+        self.persist_sessions().await;
+
+        Ok(acp_session_id)
     }
 }
 
+/// Init phase: spawn agent, initialize/resume ACP session, send result back via oneshot.
+/// Run phase: enter prompt loop (continues in same task).
 async fn spawn_and_run_agent(
     agent_cmd: &str,
     project_path: &PathBuf,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
     user_rx: mpsc::UnboundedReceiver<String>,
     status: Arc<tokio::sync::Mutex<SessionStatus>>,
-) -> Result<()> {
-    let (conn, mut child, handle_io) =
-        acp::spawn_agent(agent_cmd, project_path, event_tx.clone())?;
+    existing_acp_session_id: Option<String>,
+    result_tx: oneshot::Sender<Result<String>>,
+) {
+    match init_agent(
+        agent_cmd,
+        project_path,
+        event_tx.clone(),
+        &existing_acp_session_id,
+    )
+    .await
+    {
+        Ok((conn, mut child, acp_session_id)) => {
+            // Send the ACP session ID back
+            let session_id_str = acp_session_id.to_string();
+            if result_tx.send(Ok(session_id_str.clone())).is_err() {
+                tracing::error!("Failed to send ACP session ID back (receiver dropped)");
+                let _ = child.kill().await;
+                return;
+            }
+
+            {
+                let mut s = status.lock().await;
+                *s = SessionStatus::Idle;
+            }
+
+            // Run the prompt loop
+            let conn = Arc::new(conn);
+            session::run_prompt_loop(conn, acp_session_id, user_rx, event_tx, status).await;
+
+            // Clean up child process
+            let _ = child.kill().await;
+        }
+        Err(e) => {
+            let _ = result_tx.send(Err(anyhow::anyhow!("{e}")));
+        }
+    }
+}
+
+/// Spawn agent subprocess, handle IO, and initialize or resume the ACP session.
+async fn init_agent(
+    agent_cmd: &str,
+    project_path: &PathBuf,
+    event_tx: mpsc::UnboundedSender<AgentEvent>,
+    existing_acp_session_id: &Option<String>,
+) -> Result<(
+    agent_client_protocol::ClientSideConnection,
+    tokio::process::Child,
+    agent_client_protocol::SessionId,
+)> {
+    let is_loading = Arc::new(AtomicBool::new(existing_acp_session_id.is_some()));
+
+    let (conn, child, handle_io) =
+        acp::spawn_agent(agent_cmd, project_path, event_tx, is_loading.clone())?;
 
     tokio::task::spawn_local(async {
         if let Err(e) = handle_io.await {
@@ -160,22 +279,15 @@ async fn spawn_and_run_agent(
         }
     });
 
-    // Initialize ACP session
-    let acp_session_id = acp::init_session(&conn, project_path).await?;
+    let acp_session_id = if let Some(old_id) = existing_acp_session_id.clone() {
+        let id = acp::resume_session(&conn, project_path, old_id).await?;
+        is_loading.store(false, Ordering::Relaxed);
+        id
+    } else {
+        acp::init_session(&conn, project_path).await?
+    };
 
-    {
-        let mut s = status.lock().await;
-        *s = SessionStatus::Idle;
-    }
-
-    // Run the prompt loop
-    let conn = Arc::new(conn);
-    session::run_prompt_loop(conn, acp_session_id, user_rx, event_tx, status).await;
-
-    // Clean up child process
-    let _ = child.kill().await;
-
-    Ok(())
+    Ok((conn, child, acp_session_id))
 }
 
 /// Run the daemon: start bot + IPC listener.
@@ -192,36 +304,48 @@ pub async fn run_daemon(config: Config) -> Result<()> {
         bot: bot.clone(),
         telegraph,
         sessions: DashMap::new(),
-        thread_to_session: DashMap::new(),
         spawn_tx,
     });
 
     // LocalSet task: receives spawn requests and runs them with spawn_local
     tokio::task::spawn_local(async move {
         while let Some(req) = spawn_rx.recv().await {
-            let session_id = req.session_id.clone();
             let event_tx = req.event_tx.clone();
+            let agent_cmd = req.agent_cmd.clone();
             tokio::task::spawn_local(async move {
-                match spawn_and_run_agent(
-                    &req.agent_cmd,
+                spawn_and_run_agent(
+                    &agent_cmd,
                     &req.project_path,
                     req.event_tx,
                     req.user_rx,
                     req.status,
+                    req.existing_acp_session_id,
+                    req.result_tx,
                 )
-                .await
-                {
-                    Ok(()) => {
-                        tracing::info!("Session {} finished", session_id);
-                    }
-                    Err(e) => {
-                        tracing::error!("Session {} failed: {e}", session_id);
-                        let _ = event_tx.send(AgentEvent::Error(format!("Session failed: {e}")));
-                    }
-                }
+                .await;
+
+                // If we get here, the session is done. The event_tx drop will signal the consumer.
+                drop(event_tx);
             });
         }
     });
+
+    // Restore persisted sessions
+    let persisted = persistence::load_sessions();
+    if !persisted.is_empty() {
+        tracing::info!("Restoring {} persisted session(s)", persisted.len());
+        for info in &persisted {
+            if let Err(e) = daemon.restore_session(info).await {
+                tracing::error!(
+                    "Failed to restore session for {} (thread {}): {e}",
+                    info.project_path.display(),
+                    info.thread_id
+                );
+            }
+        }
+        // Re-persist to update any sessions that got new ACP IDs from fallback
+        daemon.persist_sessions().await;
+    }
 
     // Spawn IPC server
     let ipc_daemon = daemon.clone();
@@ -244,8 +368,8 @@ pub async fn run_daemon(config: Config) -> Result<()> {
                         )
                         .await
                     {
-                        Ok((session_id, thread_id)) => DaemonResponse::SessionCreated {
-                            session_id,
+                        Ok((acp_session_id, thread_id)) => DaemonResponse::SessionCreated {
+                            acp_session_id,
                             topic_url: format!(
                                 "https://t.me/c/{}/{}",
                                 daemon.config.chat_id, thread_id
