@@ -1,8 +1,24 @@
 [package]
-name = "quick-start-simple"
+name = "telegram-acp"
 version = "0.1.0"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+default-run = "telegram-acp"
 
 [dependencies]
+agent-client-protocol = "0.10"
+anyhow = "1"
+async-trait = "0.1"
+clap = { version = "4", features = ["derive"] }
+dashmap = "6"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+telegraph-rs = "0.6"
+teloxide = { version = "0.13", features = ["macros"] }
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
