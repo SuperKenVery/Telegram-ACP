@@ -16,19 +16,6 @@ use crate::session_control::SessionCommand;
 use crate::telegram;
 use crate::types::{AgentEvent, SessionInfo, SessionStatus};
 
-/// Request to spawn an agent, relayed to the LocalSet context.
-struct SpawnLocalRequest {
-    agent_cmd: String,
-    project_path: PathBuf,
-    event_tx: mpsc::UnboundedSender<AgentEvent>,
-    command_rx: mpsc::UnboundedReceiver<SessionCommand>,
-    status: Arc<tokio::sync::Mutex<SessionStatus>>,
-    /// If Some, resume this ACP session instead of creating a new one.
-    existing_acp_session_id: Option<String>,
-    /// Sends back the ACP session ID (or error) after init completes.
-    result_tx: oneshot::Sender<Result<String>>,
-}
-
 /// Shared daemon state, accessible from Telegram handlers and IPC.
 pub struct DaemonHandle {
     pub config: Config,
@@ -37,8 +24,6 @@ pub struct DaemonHandle {
     pub telegraph: Telegraph,
     /// thread_id -> SessionEntry
     pub sessions: DashMap<i32, SessionEntry>,
-    /// Channel to relay spawn_local work into the LocalSet.
-    spawn_tx: mpsc::UnboundedSender<SpawnLocalRequest>,
 }
 
 pub struct SessionEntry {
@@ -161,7 +146,7 @@ impl DaemonHandle {
     }
 
     /// Common logic for starting a session (new or restored).
-    /// Spawns event consumer, sends SpawnLocalRequest, waits for ACP init, inserts into DashMap.
+    /// Spawns event consumer and agent task, waits for ACP init, inserts into DashMap.
     async fn start_session(
         &self,
         thread_id: i32,
@@ -175,26 +160,26 @@ impl DaemonHandle {
 
         let status = Arc::new(tokio::sync::Mutex::new(SessionStatus::Initializing));
 
-        // Spawn the event consumer (sends AgentEvents to Telegram) — regular tokio::spawn is fine
+        // Spawn the event consumer within LocalSet.
         let bot = self.bot.clone();
         let chat_id = ChatId(self.config.chat_id);
-        tokio::spawn(telegram::run_event_consumer(
+        tokio::task::spawn_local(telegram::run_event_consumer(
             bot, chat_id, thread_id, event_rx,
         ));
 
         // Create oneshot for receiving the ACP session ID
         let (result_tx, result_rx) = oneshot::channel();
 
-        // Relay the agent spawn to the LocalSet via channel
-        self.spawn_tx.send(SpawnLocalRequest {
-            agent_cmd: agent_cmd.clone(),
-            project_path: project_path.clone(),
+        // Spawn ACP init + session loop directly in LocalSet.
+        tokio::task::spawn_local(spawn_and_run_agent(
+            agent_cmd.clone(),
+            project_path.clone(),
             event_tx,
             command_rx,
-            status: status.clone(),
+            status.clone(),
             existing_acp_session_id,
             result_tx,
-        })?;
+        ));
 
         // Wait for ACP init to complete
         let acp_session_id = result_rx.await??;
@@ -221,8 +206,8 @@ impl DaemonHandle {
 /// Init phase: spawn agent, initialize/resume ACP session, send result back via oneshot.
 /// Run phase: enter prompt loop (continues in same task).
 async fn spawn_and_run_agent(
-    agent_cmd: &str,
-    project_path: &PathBuf,
+    agent_cmd: String,
+    project_path: PathBuf,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
     command_rx: mpsc::UnboundedReceiver<SessionCommand>,
     status: Arc<tokio::sync::Mutex<SessionStatus>>,
@@ -230,8 +215,8 @@ async fn spawn_and_run_agent(
     result_tx: oneshot::Sender<Result<String>>,
 ) {
     match init_agent(
-        agent_cmd,
-        project_path,
+        &agent_cmd,
+        &project_path,
         event_tx.clone(),
         &existing_acp_session_id,
     )
@@ -313,37 +298,11 @@ pub async fn run_daemon(config: Config) -> Result<()> {
     let bot = Bot::new(&config.bot_token);
     let telegraph = crate::telegraph::create_account(config.telegraph_author.as_deref()).await?;
 
-    let (spawn_tx, mut spawn_rx) = mpsc::unbounded_channel::<SpawnLocalRequest>();
-
     let daemon = Arc::new(DaemonHandle {
         config: config.clone(),
         bot: bot.clone(),
         telegraph,
         sessions: DashMap::new(),
-        spawn_tx,
-    });
-
-    // LocalSet task: receives spawn requests and runs them with spawn_local
-    tokio::task::spawn_local(async move {
-        while let Some(req) = spawn_rx.recv().await {
-            let event_tx = req.event_tx.clone();
-            let agent_cmd = req.agent_cmd.clone();
-            tokio::task::spawn_local(async move {
-                spawn_and_run_agent(
-                    &agent_cmd,
-                    &req.project_path,
-                    req.event_tx,
-                    req.command_rx,
-                    req.status,
-                    req.existing_acp_session_id,
-                    req.result_tx,
-                )
-                .await;
-
-                // If we get here, the session is done. The event_tx drop will signal the consumer.
-                drop(event_tx);
-            });
-        }
     });
 
     // Restore persisted sessions
@@ -366,7 +325,7 @@ pub async fn run_daemon(config: Config) -> Result<()> {
     // Spawn IPC server
     let ipc_daemon = daemon.clone();
     let socket_path = config.socket_path.clone();
-    tokio::spawn(async move {
+    tokio::task::spawn_local(async move {
         if let Err(e) = crate::ipc::run_ipc_server(&socket_path, move |cmd| {
             let daemon = ipc_daemon.clone();
             Box::pin(async move {

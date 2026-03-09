@@ -1,7 +1,6 @@
 use acp::Agent;
 use agent_client_protocol as acp;
 use anyhow::Result;
-use serde_json::Value;
 use similar::TextDiff;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -76,11 +75,7 @@ impl acp::Client for TelegramClient {
                 }
             }
             acp::SessionUpdate::ToolCall(tool_call) => {
-                let details = extract_tool_details(
-                    &tool_call.title,
-                    tool_call.raw_input.as_ref(),
-                    &tool_call.content,
-                );
+                let details = extract_tool_details(&tool_call.content);
                 self.send_event(AgentEvent::ToolCall {
                     id: tool_call.tool_call_id.to_string(),
                     name: tool_call.title.clone(),
@@ -93,11 +88,7 @@ impl acp::Client for TelegramClient {
                     .content
                     .as_ref()
                     .and_then(|contents| extract_tool_output(contents));
-                let details = extract_tool_details(
-                    fields.title.as_deref().unwrap_or(""),
-                    fields.raw_input.as_ref(),
-                    fields.content.as_deref().unwrap_or(&[]),
-                );
+                let details = extract_tool_details(fields.content.as_deref().unwrap_or(&[]));
                 let title = fields.title.unwrap_or_default();
                 self.send_event(AgentEvent::ToolCallUpdate {
                     id: update.tool_call_id.to_string(),
@@ -148,45 +139,8 @@ fn extract_tool_output(contents: &[acp::ToolCallContent]) -> Option<String> {
     }
 }
 
-fn extract_tool_details(
-    title: &str,
-    raw_input: Option<&Value>,
-    contents: &[acp::ToolCallContent],
-) -> Option<String> {
-    if let Some(diff_text) = extract_diff_details(contents) {
-        return Some(diff_text);
-    }
-
-    if !looks_like_edit_tool(title) {
-        return None;
-    }
-
-    let input = raw_input?;
-    let new_text = find_string_value(
-        input,
-        &[
-            "newText",
-            "new_text",
-            "newString",
-            "new_string",
-            "content",
-            "patch",
-        ],
-    )?;
-    let old_text = find_string_value(input, &["oldText", "old_text", "oldString", "old_string"]);
-    let path = find_string_value(
-        input,
-        &[
-            "path",
-            "filePath",
-            "file_path",
-            "targetFile",
-            "target_file",
-            "filename",
-        ],
-    );
-
-    Some(format_unified_diff(path, old_text.as_deref(), &new_text))
+fn extract_tool_details(contents: &[acp::ToolCallContent]) -> Option<String> {
+    extract_diff_details(contents)
 }
 
 fn extract_diff_details(contents: &[acp::ToolCallContent]) -> Option<String> {
@@ -227,57 +181,6 @@ fn format_unified_diff(path: Option<String>, old_text: Option<&str>, new_text: &
     }
 }
 
-fn looks_like_edit_tool(title: &str) -> bool {
-    let lower = title.to_ascii_lowercase();
-    lower.contains("edit")
-        || lower.contains("write")
-        || lower.contains("replace")
-        || lower.contains("apply_patch")
-}
-
-fn find_string_value(value: &Value, keys: &[&str]) -> Option<String> {
-    let targets: Vec<String> = keys.iter().map(|k| normalize_key(k)).collect();
-    find_string_value_inner(value, &targets)
-}
-
-fn find_string_value_inner(value: &Value, keys: &[String]) -> Option<String> {
-    match value {
-        Value::Object(map) => {
-            for (k, v) in map {
-                if keys.iter().any(|target| *target == normalize_key(k)) {
-                    if let Value::String(s) = v {
-                        if !s.trim().is_empty() {
-                            return Some(s.clone());
-                        }
-                    }
-                }
-            }
-
-            for v in map.values() {
-                if let Some(found) = find_string_value_inner(v, keys) {
-                    return Some(found);
-                }
-            }
-            None
-        }
-        Value::Array(items) => {
-            for item in items {
-                if let Some(found) = find_string_value_inner(item, keys) {
-                    return Some(found);
-                }
-            }
-            None
-        }
-        _ => None,
-    }
-}
-
-fn normalize_key(key: &str) -> String {
-    key.chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .flat_map(|ch| ch.to_lowercase())
-        .collect()
-}
 
 /// Spawn an ACP agent subprocess and return the connection + child handle.
 /// Must be called within a tokio LocalSet.

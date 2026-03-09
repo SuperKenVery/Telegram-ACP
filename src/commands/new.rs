@@ -4,6 +4,8 @@ use teloxide::prelude::*;
 use teloxide::types::{MessageId, ParseMode, ThreadId};
 
 use crate::formatting;
+use crate::ipc;
+use crate::types::{DaemonCommand, DaemonResponse};
 
 use super::{Command, CommandContext};
 
@@ -21,12 +23,14 @@ impl Command for NewCommand {
             .get_session_project_path_by_thread(ctx.thread_id)
             .ok_or_else(|| anyhow!("No active session in this topic"))?;
 
-        match ctx
-            .daemon
-            .spawn_session(project_path.to_string_lossy().to_string(), None, None)
-            .await
-        {
-            Ok((acp_session_id, _new_thread_id)) => {
+        let cmd = DaemonCommand::NewSession {
+            path: project_path,
+            prompt: None,
+            agent: None,
+        };
+
+        match ipc::send_command(&ctx.daemon.config.socket_path, &cmd).await? {
+            DaemonResponse::SessionCreated { acp_session_id, .. } => {
                 let reply = format!(
                     "Session `{}` created in a new topic\\.",
                     formatting::escape_markdown_v2(&acp_session_id)
@@ -37,9 +41,15 @@ impl Command for NewCommand {
                     .parse_mode(ParseMode::MarkdownV2)
                     .await?;
             }
-            Err(e) => {
+            DaemonResponse::Error { message } => {
                 ctx.bot
-                    .send_message(ctx.msg.chat.id, format!("Failed to create session: {e}"))
+                    .send_message(ctx.msg.chat.id, format!("Failed to create session: {message}"))
+                    .message_thread_id(ThreadId(MessageId(ctx.thread_id)))
+                    .await?;
+            }
+            _ => {
+                ctx.bot
+                    .send_message(ctx.msg.chat.id, "Failed to create session: unexpected response")
                     .message_thread_id(ThreadId(MessageId(ctx.thread_id)))
                     .await?;
             }

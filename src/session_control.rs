@@ -52,34 +52,6 @@ fn flatten_select_options(
     }
 }
 
-fn find_model_selector(config_options: &[acp::SessionConfigOption]) -> Option<ModelSelectorState> {
-    let model_option = config_options.iter().find(|opt| {
-        let by_category = matches!(opt.category, Some(acp::SessionConfigOptionCategory::Model));
-        let by_name = opt.name.to_ascii_lowercase().contains("model")
-            || opt.id.0.to_ascii_lowercase().contains("model");
-        by_category || by_name
-    })?;
-
-    let select = match &model_option.kind {
-        acp::SessionConfigKind::Select(select) => select,
-        _ => return None,
-    };
-
-    let options = flatten_select_options(&select.options)
-        .into_iter()
-        .map(|value| SelectionOption {
-            id: value.value.0.to_string(),
-            name: value.name.clone(),
-        })
-        .collect();
-
-    Some(ModelSelectorState {
-        config_id: model_option.id.0.to_string(),
-        current_value_id: select.current_value.0.to_string(),
-        options,
-    })
-}
-
 pub fn build_control_state(
     mode_state: &Option<acp::SessionModeState>,
     config_options: &[acp::SessionConfigOption],
@@ -99,9 +71,27 @@ pub fn build_control_state(
         None => (None, Vec::new()),
     };
 
+    let model_selector = config_options
+        .iter()
+        .find(|opt| matches!(opt.category, Some(acp::SessionConfigOptionCategory::Model)))
+        .and_then(|model_option| match &model_option.kind {
+            acp::SessionConfigKind::Select(select) => Some(ModelSelectorState {
+                config_id: model_option.id.0.to_string(),
+                current_value_id: select.current_value.0.to_string(),
+                options: flatten_select_options(&select.options)
+                    .into_iter()
+                    .map(|value| SelectionOption {
+                        id: value.value.0.to_string(),
+                        name: value.name.clone(),
+                    })
+                    .collect(),
+            }),
+            _ => None,
+        });
+
     SessionControlState {
         current_permission_mode_id,
         permission_modes,
-        model_selector: find_model_selector(config_options),
+        model_selector,
     }
 }
