@@ -2,11 +2,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use teloxide::prelude::*;
-use teloxide::types::{MessageId, ParseMode, ThreadId};
+use teloxide::types::{CallbackQuery, MessageId, ParseMode, ThreadId};
 use tokio::sync::mpsc;
 
+use crate::commands;
 use crate::daemon::DaemonHandle;
 use crate::formatting;
+use crate::session_control::SessionCommand;
 use crate::types::AgentEvent;
 
 /// Send a message draft (streaming partial text) via the raw Telegram Bot API.
@@ -58,7 +60,9 @@ pub async fn run_bot(bot: Bot, daemon: Arc<DaemonHandle>) {
     use teloxide::dptree;
     use teloxide::types::Update;
 
-    let handler = dptree::entry().branch(Update::filter_message().endpoint(handle_message));
+    let handler = dptree::entry()
+        .branch(Update::filter_message().endpoint(handle_message))
+        .branch(Update::filter_callback_query().endpoint(handle_callback_query));
 
     Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![daemon])
@@ -70,64 +74,20 @@ pub async fn run_bot(bot: Bot, daemon: Arc<DaemonHandle>) {
 
 /// Handle an incoming Telegram message.
 async fn handle_message(bot: Bot, msg: Message, daemon: Arc<DaemonHandle>) -> anyhow::Result<()> {
-    let text = match msg.text() {
-        Some(t) => t,
-        None => return Ok(()),
-    };
-
     // Only process messages in our target chat
     if msg.chat.id != ChatId(daemon.config.chat_id) {
         return Ok(());
     }
 
-    // Handle /new command
-    if text.starts_with("/new") {
-        handle_new_command(&bot, &msg, text, &daemon).await?;
+    // Handle known slash commands
+    if commands::execute_slash_command(&bot, &msg, &daemon).await? {
         return Ok(());
     }
 
     // Handle messages in forum topics -> route to session
     if let Some(thread_id) = msg.thread_id {
-        handle_topic_message(&bot, &msg, text, thread_id, &daemon).await?;
-    }
-
-    Ok(())
-}
-
-/// Handle the /new command to spawn a new agent session.
-async fn handle_new_command(
-    bot: &Bot,
-    msg: &Message,
-    text: &str,
-    daemon: &DaemonHandle,
-) -> anyhow::Result<()> {
-    let args: Vec<&str> = text.splitn(3, ' ').collect();
-    let path = args.get(1).unwrap_or(&"/tmp");
-    let prompt = args.get(2).map(|s| s.to_string());
-
-    match daemon
-        .spawn_session(path.to_string(), prompt.clone(), None)
-        .await
-    {
-        Ok((acp_session_id, thread_id)) => {
-            let reply = format!(
-                "Session `{}` created in topic\\.",
-                formatting::escape_markdown_v2(&acp_session_id)
-            );
-            bot.send_message(msg.chat.id, reply)
-                .parse_mode(ParseMode::MarkdownV2)
-                .await?;
-
-            // If there's an initial prompt, send it to the session
-            if let Some(prompt_text) = prompt {
-                if let Some(user_tx) = daemon.get_session_tx_by_thread(thread_id) {
-                    let _ = user_tx.send(prompt_text);
-                }
-            }
-        }
-        Err(e) => {
-            bot.send_message(msg.chat.id, format!("Failed to create session: {e}"))
-                .await?;
+        if let Some(text) = msg.text() {
+            handle_topic_message(text, thread_id, &daemon).await?;
         }
     }
 
@@ -136,16 +96,22 @@ async fn handle_new_command(
 
 /// Handle a message in a forum topic, routing it to the corresponding agent session.
 async fn handle_topic_message(
-    _bot: &Bot,
-    _msg: &Message,
     text: &str,
     thread_id: ThreadId,
     daemon: &DaemonHandle,
 ) -> anyhow::Result<()> {
-    if let Some(user_tx) = daemon.get_session_tx_by_thread(thread_id.0 .0) {
-        let _ = user_tx.send(text.to_string());
+    if let Some(command_tx) = daemon.get_session_command_tx_by_thread(thread_id.0 .0) {
+        let _ = command_tx.send(SessionCommand::Prompt(text.to_string()));
     }
     Ok(())
+}
+
+async fn handle_callback_query(
+    bot: Bot,
+    query: CallbackQuery,
+    daemon: Arc<DaemonHandle>,
+) -> anyhow::Result<()> {
+    commands::handle_callback_query(bot, query, daemon).await
 }
 
 /// State for an in-progress text draft being streamed.

@@ -12,6 +12,12 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::types::AgentEvent;
 
+pub struct SessionBootstrap {
+    pub session_id: acp::SessionId,
+    pub modes: Option<acp::SessionModeState>,
+    pub config_options: Vec<acp::SessionConfigOption>,
+}
+
 /// Our ACP Client implementation that forwards agent notifications as AgentEvents.
 pub struct TelegramClient {
     event_tx: mpsc::UnboundedSender<AgentEvent>,
@@ -158,12 +164,26 @@ fn extract_tool_details(
     let input = raw_input?;
     let new_text = find_string_value(
         input,
-        &["newText", "new_text", "newString", "new_string", "content", "patch"],
+        &[
+            "newText",
+            "new_text",
+            "newString",
+            "new_string",
+            "content",
+            "patch",
+        ],
     )?;
     let old_text = find_string_value(input, &["oldText", "old_text", "oldString", "old_string"]);
     let path = find_string_value(
         input,
-        &["path", "filePath", "file_path", "targetFile", "target_file", "filename"],
+        &[
+            "path",
+            "filePath",
+            "file_path",
+            "targetFile",
+            "target_file",
+            "filename",
+        ],
     );
 
     Some(format_unified_diff(path, old_text.as_deref(), &new_text))
@@ -299,7 +319,7 @@ pub fn spawn_agent(
 pub async fn init_session(
     conn: &acp::ClientSideConnection,
     project_path: &Path,
-) -> Result<acp::SessionId> {
+) -> Result<SessionBootstrap> {
     conn.initialize(
         acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_info(
             acp::Implementation::new("telegram-acp", env!("CARGO_PKG_VERSION"))
@@ -312,7 +332,11 @@ pub async fn init_session(
         .new_session(acp::NewSessionRequest::new(project_path))
         .await?;
 
-    Ok(session_resp.session_id)
+    Ok(SessionBootstrap {
+        session_id: session_resp.session_id,
+        modes: session_resp.modes,
+        config_options: session_resp.config_options.unwrap_or_default(),
+    })
 }
 
 /// Resume a previous ACP session using load_session if supported, otherwise fall back to new_session.
@@ -320,7 +344,7 @@ pub async fn resume_session(
     conn: &acp::ClientSideConnection,
     project_path: &Path,
     old_acp_session_id: String,
-) -> Result<acp::SessionId> {
+) -> Result<SessionBootstrap> {
     let init_resp = conn
         .initialize(
             acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_info(
@@ -343,9 +367,13 @@ pub async fn resume_session(
             ))
             .await
         {
-            Ok(_) => {
+            Ok(load_resp) => {
                 // load_session succeeded — reuse the same session ID
-                Ok(session_id)
+                Ok(SessionBootstrap {
+                    session_id,
+                    modes: load_resp.modes,
+                    config_options: load_resp.config_options.unwrap_or_default(),
+                })
             }
             Err(e) => {
                 tracing::warn!(
@@ -355,7 +383,11 @@ pub async fn resume_session(
                 let session_resp = conn
                     .new_session(acp::NewSessionRequest::new(project_path))
                     .await?;
-                Ok(session_resp.session_id)
+                Ok(SessionBootstrap {
+                    session_id: session_resp.session_id,
+                    modes: session_resp.modes,
+                    config_options: session_resp.config_options.unwrap_or_default(),
+                })
             }
         }
     } else {
@@ -363,6 +395,10 @@ pub async fn resume_session(
         let session_resp = conn
             .new_session(acp::NewSessionRequest::new(project_path))
             .await?;
-        Ok(session_resp.session_id)
+        Ok(SessionBootstrap {
+            session_id: session_resp.session_id,
+            modes: session_resp.modes,
+            config_options: session_resp.config_options.unwrap_or_default(),
+        })
     }
 }

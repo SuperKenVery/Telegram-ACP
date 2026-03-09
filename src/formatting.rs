@@ -5,8 +5,8 @@ pub fn escape_markdown_v2(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
         match ch {
-            '_' | '*' | '[' | ']' | '(' | ')' | '~' | '`' | '>' | '#' | '+' | '-' | '='
-            | '|' | '{' | '}' | '.' | '!' | '\\' => {
+            '_' | '*' | '[' | ']' | '(' | ')' | '~' | '`' | '>' | '#' | '+' | '-' | '=' | '|'
+            | '{' | '}' | '.' | '!' | '\\' => {
                 out.push('\\');
                 out.push(ch);
             }
@@ -52,7 +52,10 @@ pub fn format_tool_result(name: &str, output: Option<&str>, details: Option<&str
 pub fn format_completion(stop_reason: &str, telegraph_url: Option<&str>) -> String {
     let mut msg = format!("✓ *Done* \\({}\\)", escape_markdown_v2(stop_reason));
     if let Some(url) = telegraph_url {
-        msg.push_str(&format!("\n\n📄 [View changes]({})", escape_markdown_v2_url(url)));
+        msg.push_str(&format!(
+            "\n\n📄 [View changes]({})",
+            escape_markdown_v2_url(url)
+        ));
     }
     msg
 }

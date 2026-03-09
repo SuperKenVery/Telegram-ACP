@@ -1,10 +1,12 @@
 mod acp;
+mod commands;
 mod config;
 mod daemon;
 mod formatting;
 mod ipc;
 mod persistence;
 mod session;
+mod session_control;
 mod telegram;
 #[allow(dead_code)]
 mod telegraph;

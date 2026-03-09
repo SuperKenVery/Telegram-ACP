@@ -35,7 +35,7 @@
         craneLib = (crane.mkLib pkgs).overrideToolchain (
           p:
           p.rust-bin.stable.latest.default.override {
-            extensions = ["rust-src"];
+            extensions = ["rust-src" "rust-analyzer"];
           }
         );
 
