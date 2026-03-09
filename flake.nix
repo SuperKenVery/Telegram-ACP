@@ -45,13 +45,19 @@
           src = craneLib.cleanCargoSource ./.;
           strictDeps = true;
 
-          buildInputs = [
+          nativeBuildInputs = [
             # Add additional build inputs here
-          ]
-          ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+          ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+            pkgs.pkg-config
+          ];
+
+          buildInputs = [
+          ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
             # Additional darwin specific inputs can be set here
             pkgs.libiconv
-          ];
+          ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux (with pkgs; [
+            openssl
+          ]);
         };
 
         my-crate = craneLib.buildPackage (
@@ -84,9 +90,13 @@
           # MY_CUSTOM_DEVELOPMENT_VAR = "something else";
 
           # Extra inputs can be added here; cargo and rustc are provided by default.
-          packages = [
+          packages = commonArgs.buildInputs ++ [
             # pkgs.ripgrep
           ];
+
+          OPENSSL_DIR = "${pkgs.openssl.out}";
+          OPENSSL_LIB_DIR = "${pkgs.openssl.out}/lib";
+          OPENSSL_INCLUDE_DIR = "${pkgs.openssl.dev}/include";
         };
       }
     );
