@@ -93,10 +93,10 @@ impl DaemonHandle {
         &self,
         path: String,
         _prompt: Option<String>,
-        agent_cmd: Option<String>,
+        agent: Option<String>,
     ) -> Result<(String, i32)> {
         let project_path = PathBuf::from(&path);
-        let agent_cmd = agent_cmd.unwrap_or_else(|| self.config.default_agent_command.clone());
+        let agent_cmd = self.config.resolve_agent_command(agent.as_deref())?;
 
         // Create forum topic
         let topic_name = project_path

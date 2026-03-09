@@ -33,7 +33,7 @@ enum Commands {
         /// Initial prompt to send to the agent
         #[arg(short, long)]
         prompt: Option<String>,
-        /// Agent command to use (overrides config default)
+        /// Agent name from config (e.g. codex, claude)
         #[arg(short, long)]
         agent: Option<String>,
     },

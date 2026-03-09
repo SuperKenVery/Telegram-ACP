@@ -40,7 +40,13 @@ Create `~/.config/telegram-acp/config.toml`:
 ```toml
 bot_token = "<telegram-bot-token>"
 chat_id = 123456789
-default_agent_command = "claude-agent-acp"
+default_agent = "claude"
+
+[claude]
+cmd = "claude-agent-acp"
+
+[codex]
+cmd = "codex --acp"
 # socket_path = "/tmp/telegram-acp.sock"
 # telegraph_author = "Your Name"
 ```
@@ -50,7 +56,7 @@ Env overrides are also supported:
 - `TELEGRAM_ACP_BOT_TOKEN`
 - `TELEGRAM_ACP_CHAT_ID`
 - `TELEGRAM_ACP_SOCKET_PATH`
-- `TELEGRAM_ACP_AGENT_COMMAND`
+- `TELEGRAM_ACP_DEFAULT_AGENT`
 - `TELEGRAM_ACP_TELEGRAPH_AUTHOR`
 
 ### 2. Build
@@ -69,6 +75,7 @@ cargo run -- daemon
 
 ```sh
 cargo run -- new /path/to/project
+cargo run -- new /path/to/project --agent codex
 ```
 
 ## Mock agent testing
@@ -76,7 +83,16 @@ cargo run -- new /path/to/project
 Use the included mock ACP binary to test Telegram/IPC plumbing without a real coding agent:
 
 ```sh
-TELEGRAM_ACP_AGENT_COMMAND="./target/debug/mock_agent" cargo run -- daemon
+cargo run -- daemon
+```
+
+Configure it as an agent in your config:
+
+```toml
+default_agent = "mock"
+
+[mock]
+cmd = "./target/debug/mock_agent"
 ```
 
 ## Telegram requirements

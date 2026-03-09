@@ -20,10 +20,11 @@ impl Command for NewCommand {
             .daemon
             .get_session_project_path_by_thread(ctx.thread_id)
             .ok_or_else(|| anyhow!("No active session in this topic"))?;
+        let agent = parse_agent_arg(ctx.args)?;
 
         match ctx
             .daemon
-            .spawn_session(project_path.to_string_lossy().to_string(), None, None)
+            .spawn_session(project_path.to_string_lossy().to_string(), None, agent)
             .await
         {
             Ok((acp_session_id, _thread_id)) => {
@@ -47,4 +48,19 @@ impl Command for NewCommand {
 
         Ok(())
     }
+}
+
+fn parse_agent_arg(args: &str) -> Result<Option<String>> {
+    let trimmed = args.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let mut parts = trimmed.split_whitespace();
+    let agent = parts.next().unwrap_or_default();
+    if parts.next().is_some() {
+        anyhow::bail!("Usage: /new [agent]");
+    }
+
+    Ok(Some(agent.to_string()))
 }

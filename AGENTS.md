@@ -61,12 +61,18 @@ TOML file at `~/.config/telegram-acp/config.toml`:
 ```toml
 bot_token = "..."
 chat_id = 123456789          # Telegram chat ID (user or supergroup)
-default_agent_command = "claude-agent-acp"
+default_agent = "claude"
+
+[claude]
+cmd = "claude-agent-acp"
+
+[codex]
+cmd = "codex --acp"
 # socket_path = "/tmp/telegram-acp.sock"
 # telegraph_author = "Your Name"
 ```
 
-Env var overrides: `TELEGRAM_ACP_BOT_TOKEN`, `TELEGRAM_ACP_CHAT_ID`, `TELEGRAM_ACP_SOCKET_PATH`, `TELEGRAM_ACP_AGENT_COMMAND`, `TELEGRAM_ACP_TELEGRAPH_AUTHOR`.
+Env var overrides: `TELEGRAM_ACP_BOT_TOKEN`, `TELEGRAM_ACP_CHAT_ID`, `TELEGRAM_ACP_SOCKET_PATH`, `TELEGRAM_ACP_DEFAULT_AGENT`, `TELEGRAM_ACP_TELEGRAPH_AUTHOR`.
 
 The bot must have **Threaded Mode** enabled in BotFather settings for private chat topics.
 
@@ -82,5 +88,5 @@ cargo run -- status                  # list active sessions
 To test with the mock agent:
 
 ```sh
-TELEGRAM_ACP_AGENT_COMMAND="./target/debug/mock_agent" cargo run -- daemon
+cargo run -- daemon
 ```

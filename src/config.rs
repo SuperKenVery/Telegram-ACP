@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -10,7 +11,8 @@ pub struct Config {
     #[allow(dead_code)]
     pub telegraph_author_url: Option<String>,
     pub socket_path: PathBuf,
-    pub default_agent_command: String,
+    pub default_agent: String,
+    pub agents: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -20,7 +22,9 @@ struct FileConfig {
     telegraph_author: Option<String>,
     telegraph_author_url: Option<String>,
     socket_path: Option<PathBuf>,
-    default_agent_command: Option<String>,
+    default_agent: Option<String>,
+    #[serde(flatten)]
+    extra_tables: HashMap<String, toml::Table>,
 }
 
 impl Config {
@@ -57,11 +61,17 @@ impl Config {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/tmp/telegram-acp.sock"));
 
-        let default_agent_command = env_or(
-            "TELEGRAM_ACP_AGENT_COMMAND",
-            file_config.default_agent_command,
-        )
-        .unwrap_or_else(|| "claude-agent-acp".to_string());
+        let agents = parse_agents(&file_config.extra_tables);
+        let default_agent = env_or("TELEGRAM_ACP_DEFAULT_AGENT", file_config.default_agent)
+            .or_else(|| {
+                if agents.len() == 1 {
+                    agents.keys().next().cloned()
+                } else {
+                    None
+                }
+            })
+            .context("default_agent is required (set TELEGRAM_ACP_DEFAULT_AGENT or config file)")?;
+        ensure_agent_exists(&default_agent, &agents)?;
 
         let telegraph_author = env_or(
             "TELEGRAM_ACP_TELEGRAPH_AUTHOR",
@@ -78,8 +88,21 @@ impl Config {
             telegraph_author,
             telegraph_author_url,
             socket_path,
-            default_agent_command,
+            default_agent,
+            agents,
         })
+    }
+
+    pub fn resolve_agent_command(&self, selected_agent: Option<&str>) -> Result<String> {
+        let selected_agent = selected_agent
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or(&self.default_agent);
+
+        self.agents
+            .get(selected_agent)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!(unknown_agent_message(selected_agent, &self.agents)))
     }
 }
 
@@ -93,4 +116,45 @@ fn dirs_config_path() -> PathBuf {
 
 fn env_or(key: &str, fallback: Option<String>) -> Option<String> {
     std::env::var(key).ok().or(fallback)
+}
+
+fn parse_agents(extra_tables: &HashMap<String, toml::Table>) -> HashMap<String, String> {
+    let mut agents = HashMap::new();
+    for (name, table) in extra_tables {
+        if let Some(toml::Value::String(cmd)) = table.get("cmd") {
+            let trimmed = cmd.trim();
+            if !trimmed.is_empty() {
+                agents.insert(name.clone(), trimmed.to_string());
+            }
+        }
+    }
+    agents
+}
+
+fn ensure_agent_exists(default_agent: &str, agents: &HashMap<String, String>) -> Result<()> {
+    if agents.contains_key(default_agent) {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "default_agent '{}' has no matching [<agent>] table with cmd. {}",
+        default_agent,
+        unknown_agent_message(default_agent, agents)
+    );
+}
+
+fn unknown_agent_message(agent: &str, agents: &HashMap<String, String>) -> String {
+    let mut available: Vec<String> = agents.keys().cloned().collect();
+    available.sort();
+    if available.is_empty() {
+        format!(
+            "Unknown agent '{}'. No agents are configured. Add tables like [codex] with cmd = \"...\".",
+            agent
+        )
+    } else {
+        format!(
+            "Unknown agent '{}'. Available agents: {}",
+            agent,
+            available.join(", ")
+        )
+    }
 }
