@@ -181,7 +181,6 @@ fn format_unified_diff(path: Option<String>, old_text: Option<&str>, new_text: &
     }
 }
 
-
 /// Spawn an ACP agent subprocess and return the connection + child handle.
 /// Must be called within a tokio LocalSet.
 pub fn spawn_agent(
@@ -194,11 +193,11 @@ pub fn spawn_agent(
     tokio::process::Child,
     impl std::future::Future<Output = acp::Result<()>>,
 )> {
-    let parts: Vec<&str> = agent_cmd.split_whitespace().collect();
-    let (program, args) = parts.split_first().unwrap_or((&"claude-agent-acp", &[]));
-
-    let mut child = Command::new(program)
-        .args(args)
+    // Execute via shell so user-configured commands support shell expansion
+    // (e.g. `~`, quoted args, and env interpolation) consistently with manual runs.
+    let mut child = Command::new("bash")
+        .arg("-lc")
+        .arg(agent_cmd)
         .current_dir(project_path)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

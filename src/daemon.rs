@@ -253,6 +253,11 @@ async fn spawn_and_run_agent(
             let _ = child.kill().await;
         }
         Err(e) => {
+            tracing::error!(
+                "Failed to initialize ACP agent (cmd: {}, project: {}): {e}",
+                agent_cmd,
+                project_path.display()
+            );
             let _ = result_tx.send(Err(anyhow::anyhow!("{e}")));
         }
     }
