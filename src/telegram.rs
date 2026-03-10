@@ -303,6 +303,45 @@ async fn delete_working_msg(
     }
 }
 
+async fn send_markdown_message(
+    bot: &Bot,
+    chat_id: ChatId,
+    thread_id: i32,
+    text: &str,
+    disable_notification: bool,
+    throttle: &mut OutboundThrottle,
+) -> Option<Message> {
+    throttle.wait_turn().await;
+    bot.send_message(chat_id, text)
+        .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
+        .parse_mode(ParseMode::MarkdownV2)
+        .disable_notification(disable_notification)
+        .await
+        .ok()
+}
+
+async fn send_markdown_chunks(
+    bot: &Bot,
+    chat_id: ChatId,
+    thread_id: i32,
+    text: &str,
+    disable_notification: bool,
+    throttle: &mut OutboundThrottle,
+) {
+    let chunks = formatting::split_message(text, 4096);
+    for chunk in chunks {
+        let _ = send_markdown_message(
+            bot,
+            chat_id,
+            thread_id,
+            &chunk,
+            disable_notification,
+            throttle,
+        )
+        .await;
+    }
+}
+
 /// Consume AgentEvents and send them as Telegram messages in the forum topic.
 /// Consecutive text chunks are streamed via `sendMessageDraft` and finalized
 /// with `sendMessage` when a non-text event arrives or the stream ends.
@@ -339,16 +378,15 @@ pub async fn run_event_consumer(
 
                 // Stream the partial text via sendMessageDraft (best-effort)
                 let escaped_draft_text = fix_md_for_telegram(&d.text);
-                if let Err(e) =
-                    send_message_draft(
-                        &bot,
-                        chat_id,
-                        thread_id,
-                        d.draft_id,
-                        &escaped_draft_text,
-                        &mut throttle,
-                    )
-                    .await
+                if let Err(e) = send_message_draft(
+                    &bot,
+                    chat_id,
+                    thread_id,
+                    d.draft_id,
+                    &escaped_draft_text,
+                    &mut throttle,
+                )
+                .await
                 {
                     tracing::warn!(
                         chat_id = chat_id.0,
@@ -362,13 +400,12 @@ pub async fn run_event_consumer(
             }
             _ => {
                 // Non-text event: flush any accumulated draft first
-                let disable_notification = message_count > 0;
                 flush_draft(
                     &bot,
                     chat_id,
                     thread_id,
                     &mut draft,
-                    disable_notification,
+                    message_count > 0,
                     &mut throttle,
                 )
                 .await;
@@ -385,17 +422,18 @@ pub async fn run_event_consumer(
 
         match event {
             AgentEvent::Working => {
-                let text = "⏳ _Working on it\\.\\.\\._".to_string();
                 let disable_notification = message_count > 0;
                 message_count += 1;
-                throttle.wait_turn().await;
-                let result = bot
-                    .send_message(chat_id, &text)
-                    .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
-                    .parse_mode(ParseMode::MarkdownV2)
-                    .disable_notification(disable_notification)
-                    .await;
-                if let Ok(sent) = result {
+                if let Some(sent) = send_markdown_message(
+                    &bot,
+                    chat_id,
+                    thread_id,
+                    "⏳ _Working on it\\.\\.\\._",
+                    disable_notification,
+                    &mut throttle,
+                )
+                .await
+                {
                     working_msg_id = Some(sent.id);
                 }
             }
@@ -405,16 +443,17 @@ pub async fn run_event_consumer(
                 let kind = tool_call.kind;
                 let status = tool_call.status;
                 let details = extract_tool_details(&tool_call.content);
-                let text = formatting::format_tool_call(&name, kind, status, details.as_deref());
                 let disable_notification = message_count > 0;
                 message_count += 1;
-                throttle.wait_turn().await;
-                if let Ok(sent) = bot
-                    .send_message(chat_id, &text)
-                    .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
-                    .parse_mode(ParseMode::MarkdownV2)
-                    .disable_notification(disable_notification)
-                    .await
+                if let Some(sent) = send_markdown_message(
+                    &bot,
+                    chat_id,
+                    thread_id,
+                    &formatting::format_tool_call(&name, kind, status, details.as_deref()),
+                    disable_notification,
+                    &mut throttle,
+                )
+                .await
                 {
                     tool_call_messages.insert(
                         id,
@@ -494,13 +533,15 @@ pub async fn run_event_consumer(
                 // Fallback: if edit fails or we don't have prior tool-call message, send a new one.
                 let disable_notification = message_count > 0;
                 message_count += 1;
-                throttle.wait_turn().await;
-                if let Ok(sent) = bot
-                    .send_message(chat_id, &text)
-                    .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
-                    .parse_mode(ParseMode::MarkdownV2)
-                    .disable_notification(disable_notification)
-                    .await
+                if let Some(sent) = send_markdown_message(
+                    &bot,
+                    chat_id,
+                    thread_id,
+                    &text,
+                    disable_notification,
+                    &mut throttle,
+                )
+                .await
                 {
                     tool_call_messages.insert(
                         id,
@@ -515,50 +556,42 @@ pub async fn run_event_consumer(
                 }
             }
             AgentEvent::Update(acp::SessionUpdate::UsageUpdate(usage)) => {
-                let text = formatting::format_text_message(&format_usage_update(&usage));
-                let chunks = formatting::split_message(&text, 4096);
                 let disable_notification = message_count > 0;
                 message_count += 1;
-                for chunk in chunks {
-                    throttle.wait_turn().await;
-                    let _ = bot
-                        .send_message(chat_id, &chunk)
-                        .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
-                        .parse_mode(ParseMode::MarkdownV2)
-                        .disable_notification(disable_notification)
-                        .await;
-                }
+                send_markdown_chunks(
+                    &bot,
+                    chat_id,
+                    thread_id,
+                    &formatting::format_text_message(&format_usage_update(&usage)),
+                    disable_notification,
+                    &mut throttle,
+                )
+                .await;
             }
             AgentEvent::Update(_) => {}
             AgentEvent::Finished(reason) => {
-                let text = formatting::format_completion(&reason, None);
-                let chunks = formatting::split_message(&text, 4096);
-                let disable_notification = false;
-                for chunk in chunks {
-                    throttle.wait_turn().await;
-                    let _ = bot
-                        .send_message(chat_id, &chunk)
-                        .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
-                        .parse_mode(ParseMode::MarkdownV2)
-                        .disable_notification(disable_notification)
-                        .await;
-                }
+                send_markdown_chunks(
+                    &bot,
+                    chat_id,
+                    thread_id,
+                    &formatting::format_completion(&reason, None),
+                    false,
+                    &mut throttle,
+                )
+                .await;
                 message_count = 0;
                 tool_call_messages.clear();
             }
             AgentEvent::Error(e) => {
-                let text = formatting::format_error(&e);
-                let chunks = formatting::split_message(&text, 4096);
-                let disable_notification = false;
-                for chunk in chunks {
-                    throttle.wait_turn().await;
-                    let _ = bot
-                        .send_message(chat_id, &chunk)
-                        .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
-                        .parse_mode(ParseMode::MarkdownV2)
-                        .disable_notification(disable_notification)
-                        .await;
-                }
+                send_markdown_chunks(
+                    &bot,
+                    chat_id,
+                    thread_id,
+                    &formatting::format_error(&e),
+                    false,
+                    &mut throttle,
+                )
+                .await;
                 message_count = 0;
                 tool_call_messages.clear();
             }
