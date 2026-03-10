@@ -85,6 +85,51 @@ pub fn format_error(error: &str) -> String {
     format!("❌ *Error:* {}", escape_markdown_v2(error))
 }
 
+pub fn format_plan(plan: &acp::Plan) -> String {
+    let mut entries: Vec<_> = plan.entries.iter().collect();
+    entries.sort_by_key(|entry| match entry.status {
+        acp::PlanEntryStatus::InProgress => 0,
+        acp::PlanEntryStatus::Pending => 1,
+        acp::PlanEntryStatus::Completed => 2,
+        _ => 3,
+    });
+
+    let title = entries
+        .iter()
+        .find(|entry| matches!(entry.status, acp::PlanEntryStatus::InProgress))
+        .map(|entry| entry.content.as_str())
+        .unwrap_or("Plan");
+
+    let mut lines = Vec::with_capacity(entries.len() + 2);
+    lines.push(escape_markdown_v2(title));
+    lines.push(String::new());
+
+    for (idx, entry) in entries.iter().enumerate() {
+        let content = escape_markdown_v2(&entry.content);
+        let line = match entry.status {
+            acp::PlanEntryStatus::Completed => format!("{}. ✅ {}", idx + 1, content),
+            _ => format!("{}. {}", idx + 1, content),
+        };
+        lines.push(line);
+    }
+
+    truncate_message(&lines.join("\n"), 4096)
+}
+
+pub fn format_plan_completed(plan: &acp::Plan) -> String {
+    let mut lines = Vec::with_capacity(plan.entries.len() + 2);
+    lines.push("✅ Plan completed".to_string());
+    lines.push(String::new());
+    for (idx, entry) in plan.entries.iter().enumerate() {
+        lines.push(format!(
+            "{}. ✅ {}",
+            idx + 1,
+            escape_markdown_v2(&entry.content)
+        ));
+    }
+    truncate_message(&lines.join("\n"), 4096)
+}
+
 /// Truncate a message to fit within a maximum length.
 /// If truncated, appends "…[truncated]".
 fn truncate_message(text: &str, max_len: usize) -> String {

@@ -453,6 +453,7 @@ pub async fn run_event_consumer(
     let mut message_count = 0u32;
     let mut draft: Option<DraftState> = None;
     let mut tool_call_messages: HashMap<String, ToolCallMessageState> = HashMap::new();
+    let mut plan_message_id: Option<MessageId> = None;
     let mut throttle = OutboundThrottle::per_second(1);
     let mut working_msg_id: Option<teloxide::types::MessageId> = None;
 
@@ -733,6 +734,66 @@ pub async fn run_event_consumer(
                 )
                 .await;
             }
+            AgentEvent::Update(acp::SessionUpdate::Plan(plan)) => {
+                if is_plan_completed(&plan) {
+                    if let Some(old_plan_message_id) = plan_message_id.take() {
+                        throttle.wait_turn().await;
+                        let _ = bot.delete_message(chat_id, old_plan_message_id).await;
+                    }
+
+                    send_markdown_chunks(
+                        &bot,
+                        chat_id,
+                        thread_id,
+                        &formatting::format_plan_completed(&plan),
+                        false,
+                        &mut throttle,
+                    )
+                    .await;
+                    continue;
+                }
+
+                let formatted = formatting::format_plan(&plan);
+                if let Some(existing_plan_message_id) = plan_message_id {
+                    throttle.wait_turn().await;
+                    if bot
+                        .edit_message_text(chat_id, existing_plan_message_id, formatted.clone())
+                        .parse_mode(ParseMode::MarkdownV2)
+                        .await
+                        .is_ok()
+                    {
+                        continue;
+                    }
+                }
+
+                let disable_notification = message_count > 0;
+                message_count += 1;
+                if let Some(sent) = send_markdown_message(
+                    &bot,
+                    chat_id,
+                    thread_id,
+                    &formatted,
+                    disable_notification,
+                    &mut throttle,
+                )
+                .await
+                {
+                    plan_message_id = Some(sent.id);
+                    throttle.wait_turn().await;
+                    if let Err(e) = bot
+                        .pin_chat_message(chat_id, sent.id)
+                        .disable_notification(true)
+                        .await
+                    {
+                        tracing::warn!(
+                            chat_id = chat_id.0,
+                            thread_id = thread_id,
+                            message_id = sent.id.0,
+                            "Failed to pin plan message: {e}"
+                        );
+                    }
+                }
+            }
             AgentEvent::Update(_) => {}
             AgentEvent::Finished(reason) => {
                 send_markdown_chunks(
@@ -868,4 +929,12 @@ fn rand_draft_id() -> i64 {
     let mut h = s.build_hasher();
     h.write_u8(0);
     h.finish() as i64
+}
+
+fn is_plan_completed(plan: &acp::Plan) -> bool {
+    !plan.entries.is_empty()
+        && plan
+            .entries
+            .iter()
+            .all(|entry| matches!(entry.status, acp::PlanEntryStatus::Completed))
 }
