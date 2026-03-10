@@ -449,6 +449,7 @@ pub async fn run_event_consumer(
     chat_id: ChatId,
     thread_id: i32,
     mut event_rx: mpsc::UnboundedReceiver<AgentEvent>,
+    available_commands_cache: Arc<Mutex<Vec<acp::AvailableCommand>>>,
 ) {
     let mut message_count = 0u32;
     let mut draft: Option<DraftState> = None;
@@ -459,6 +460,11 @@ pub async fn run_event_consumer(
 
     while let Some(event) = event_rx.recv().await {
         match &event {
+            AgentEvent::Update(acp::SessionUpdate::AvailableCommandsUpdate(update)) => {
+                let mut cache = available_commands_cache.lock().await;
+                replace_available_commands(&mut cache, update);
+                continue;
+            }
             AgentEvent::Update(acp::SessionUpdate::AgentMessageChunk(chunk)) => {
                 let t = extract_text(&chunk.content);
                 if t.is_empty() {
@@ -937,4 +943,39 @@ fn is_plan_completed(plan: &acp::Plan) -> bool {
             .entries
             .iter()
             .all(|entry| matches!(entry.status, acp::PlanEntryStatus::Completed))
+}
+
+fn replace_available_commands(
+    cache: &mut Vec<acp::AvailableCommand>,
+    update: &acp::AvailableCommandsUpdate,
+) {
+    *cache = update.available_commands.clone();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::replace_available_commands;
+    use agent_client_protocol as acp;
+
+    #[test]
+    fn available_commands_update_replaces_previous_value() {
+        let mut cache = vec![acp::AvailableCommand::new("old", "Old command")];
+        let update = acp::AvailableCommandsUpdate::new(vec![acp::AvailableCommand::new(
+            "new",
+            "New command",
+        )]);
+
+        replace_available_commands(&mut cache, &update);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache[0].name, "new");
+    }
+
+    #[test]
+    fn available_commands_update_can_clear_cache() {
+        let mut cache = vec![acp::AvailableCommand::new("old", "Old command")];
+        let update = acp::AvailableCommandsUpdate::new(vec![]);
+
+        replace_available_commands(&mut cache, &update);
+        assert!(cache.is_empty());
+    }
 }

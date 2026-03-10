@@ -10,6 +10,8 @@ use crate::daemon::DaemonHandle;
 use crate::session_control::{SessionCommand, SessionControlState};
 
 mod cancel;
+mod command;
+mod commands;
 mod model;
 mod new;
 mod permission;
@@ -17,6 +19,8 @@ mod remove;
 mod rename;
 
 use cancel::CancelCommand;
+use command::CommandCommand;
+use commands::CommandsCommand;
 use model::ModelCommand;
 use new::NewCommand;
 use permission::PermissionCommand;
@@ -46,7 +50,16 @@ fn command_registry() -> Vec<Box<dyn Command>> {
         Box::new(PermissionCommand),
         Box::new(RenameCommand),
         Box::new(RemoveCommand),
+        Box::new(CommandsCommand),
+        Box::new(CommandCommand),
     ]
+}
+
+#[cfg(test)]
+fn has_registered_command(name: &str) -> bool {
+    command_registry()
+        .into_iter()
+        .any(|command| command.name() == name)
 }
 
 pub fn telegram_menu_commands() -> Vec<BotCommand> {
@@ -218,4 +231,30 @@ pub(super) async fn set_config_option(
 
 pub(super) async fn cancel_prompt(daemon: &DaemonHandle, thread_id: i32) -> Result<()> {
     daemon.cancel_session(thread_id).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{has_registered_command, parse_command};
+
+    #[test]
+    fn parse_slash_command_token_and_args() {
+        assert_eq!(
+            parse_command("/new /tmp/project"),
+            Some(("new".to_string(), "/tmp/project".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_ignores_non_slash_text() {
+        assert_eq!(parse_command("hello"), None);
+    }
+
+    #[test]
+    fn registry_contains_new_agent_commands() {
+        assert!(has_registered_command("commands"));
+        assert!(has_registered_command("command"));
+        assert!(has_registered_command("new"));
+        assert!(!has_registered_command("missing"));
+    }
 }

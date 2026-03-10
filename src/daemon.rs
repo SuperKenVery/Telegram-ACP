@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use agent_client_protocol as acp_sdk;
 use anyhow::Result;
 use dashmap::DashMap;
 use futures::future::join_all;
@@ -34,6 +35,7 @@ pub struct SessionEntry {
     pub project_path: PathBuf,
     pub agent_command: String,
     pub status: Arc<tokio::sync::Mutex<SessionStatus>>,
+    pub available_commands: Arc<tokio::sync::Mutex<Vec<acp_sdk::AvailableCommand>>>,
     pub command_tx: mpsc::UnboundedSender<SessionCommand>,
     pub cancel_tx: mpsc::UnboundedSender<oneshot::Sender<Result<()>>>,
 }
@@ -80,6 +82,18 @@ impl DaemonHandle {
         self.sessions
             .get(&thread_id)
             .map(|entry| entry.project_path.clone())
+    }
+
+    pub async fn get_available_commands_by_thread(
+        &self,
+        thread_id: i32,
+    ) -> Option<Vec<acp_sdk::AvailableCommand>> {
+        let available_commands = self
+            .sessions
+            .get(&thread_id)
+            .map(|entry| entry.available_commands.clone())?;
+        let commands = available_commands.lock().await.clone();
+        Some(commands)
     }
 
     pub async fn list_sessions(&self) -> Vec<SessionInfo> {
@@ -246,6 +260,7 @@ impl DaemonHandle {
         let (command_tx, command_rx) = mpsc::unbounded_channel::<SessionCommand>();
         let (cancel_tx, cancel_rx) = mpsc::unbounded_channel::<oneshot::Sender<Result<()>>>();
         let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let available_commands = Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
         let status = Arc::new(tokio::sync::Mutex::new(SessionStatus::Initializing));
 
@@ -253,7 +268,11 @@ impl DaemonHandle {
         let bot = self.bot.clone();
         let chat_id = ChatId(self.config.chat_id);
         tokio::task::spawn_local(session::run_event_consumer(
-            bot, chat_id, thread_id, event_rx,
+            bot,
+            chat_id,
+            thread_id,
+            event_rx,
+            available_commands.clone(),
         ));
 
         // Create oneshot for receiving the ACP session ID
@@ -285,6 +304,7 @@ impl DaemonHandle {
                 project_path,
                 agent_command: agent_cmd,
                 status,
+                available_commands,
                 command_tx,
                 cancel_tx,
             },

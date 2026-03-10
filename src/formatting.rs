@@ -130,6 +130,27 @@ pub fn format_plan_completed(plan: &acp::Plan) -> String {
     truncate_message(&lines.join("\n"), 4096)
 }
 
+pub fn format_available_commands(commands: &[acp::AvailableCommand]) -> String {
+    if commands.is_empty() {
+        return escape_markdown_v2("No agent slash commands are advertised for this session.");
+    }
+
+    let mut lines = Vec::with_capacity(commands.len() * 2 + 2);
+    lines.push("Available agent commands:".to_string());
+    lines.push(String::new());
+
+    for command in commands {
+        let mut line = format!("• /{}: {}", command.name, command.description);
+        if let Some(acp::AvailableCommandInput::Unstructured(input)) = &command.input {
+            line.push_str(&format!(" (input: {})", input.hint));
+        }
+        lines.push(line);
+    }
+
+    let full_text = lines.join("\n");
+    truncate_message(&escape_markdown_v2(&full_text), 4096)
+}
+
 /// Truncate a message to fit within a maximum length.
 /// If truncated, appends "…[truncated]".
 fn truncate_message(text: &str, max_len: usize) -> String {
@@ -230,4 +251,27 @@ fn escape_markdown_v2_url(text: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_available_commands;
+    use agent_client_protocol as acp;
+
+    #[test]
+    fn formats_empty_available_commands() {
+        let text = format_available_commands(&[]);
+        assert!(text.contains("No agent slash commands"));
+    }
+
+    #[test]
+    fn formats_commands_with_hint() {
+        let cmd = acp::AvailableCommand::new("search", "Search the codebase").input(
+            acp::AvailableCommandInput::Unstructured(acp::UnstructuredCommandInput::new("query")),
+        );
+        let text = format_available_commands(&[cmd]);
+        assert!(text.contains("/search"));
+        assert!(text.contains("Search the codebase"));
+        assert!(text.contains("input: query"));
+    }
 }

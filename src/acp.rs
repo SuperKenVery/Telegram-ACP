@@ -73,6 +73,7 @@ impl acp::Client for TelegramClient {
             | acp::SessionUpdate::ToolCall(_)
             | acp::SessionUpdate::ToolCallUpdate(_)
             | acp::SessionUpdate::Plan(_)
+            | acp::SessionUpdate::AvailableCommandsUpdate(_)
             | acp::SessionUpdate::UsageUpdate(_) => self.send_event(AgentEvent::Update(update)),
             _ => {
                 // Ignore other notification types (UserMessageChunk, mode/config updates, etc.)
