@@ -5,7 +5,7 @@ edition = "2021"
 default-run = "telegram-acp"
 
 [dependencies]
-agent-client-protocol = "0.10"
+agent-client-protocol = { version = "0.10", features = ["unstable_session_usage"] }
 reqwest = { version = "0.12", features = ["json", "socks"] }
 anyhow = "1"
 async-trait = "0.1"

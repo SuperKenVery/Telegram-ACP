@@ -97,6 +97,9 @@ impl acp::Client for TelegramClient {
                     details,
                 });
             }
+            acp::SessionUpdate::UsageUpdate(usage) => {
+                self.send_event(AgentEvent::TextMessage(format_usage_update(&usage)));
+            }
             _ => {
                 // Ignore other notification types (Plan, UserMessageChunk, etc.)
             }
@@ -179,6 +182,25 @@ fn format_unified_diff(path: Option<String>, old_text: Option<&str>, new_text: &
     } else {
         unified
     }
+}
+
+fn format_usage_update(usage: &acp::UsageUpdate) -> String {
+    let percent = if usage.size == 0 {
+        0.0
+    } else {
+        (usage.used as f64 / usage.size as f64) * 100.0
+    };
+
+    let cost = usage
+        .cost
+        .as_ref()
+        .map(|c| format!(", cost {:.4} {}", c.amount, c.currency))
+        .unwrap_or_default();
+
+    format!(
+        "Usage update: {}/{} tokens ({percent:.1}%){}",
+        usage.used, usage.size, cost
+    )
 }
 
 /// Spawn an ACP agent subprocess and return the connection + child handle.

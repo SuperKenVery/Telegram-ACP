@@ -141,7 +141,10 @@ async fn flush_draft(
             return;
         }
         let formatted = formatting::format_text_message(&d.text);
-        let chunks = formatting::split_message(&formatted, 4096);
+        // Keep finalize behavior aligned with streaming drafts:
+        // normalize/escape agent markdown before sending via MarkdownV2.
+        let finalized_text = fix_md_for_telegram(&formatted);
+        let chunks = formatting::split_message(&finalized_text, 4096);
         for chunk in chunks {
             let send_result = bot
                 .send_message(chat_id, chunk.clone())

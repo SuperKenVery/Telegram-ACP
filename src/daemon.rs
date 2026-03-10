@@ -22,6 +22,8 @@ pub struct DaemonHandle {
     pub bot: Bot,
     #[allow(dead_code)]
     pub telegraph: Telegraph,
+    /// Relay for starting ACP sessions inside the daemon's LocalSet task.
+    local_start_tx: mpsc::UnboundedSender<StartSessionRequest>,
     /// thread_id -> SessionEntry
     pub sessions: DashMap<i32, SessionEntry>,
 }
@@ -32,6 +34,14 @@ pub struct SessionEntry {
     pub agent_command: String,
     pub status: Arc<tokio::sync::Mutex<SessionStatus>>,
     pub command_tx: mpsc::UnboundedSender<SessionCommand>,
+}
+
+struct StartSessionRequest {
+    thread_id: i32,
+    project_path: PathBuf,
+    agent_cmd: String,
+    existing_acp_session_id: Option<String>,
+    result_tx: oneshot::Sender<Result<String>>,
 }
 
 impl DaemonHandle {
@@ -110,7 +120,7 @@ impl DaemonHandle {
         let thread_id = topic.thread_id.0 .0;
 
         let acp_session_id = self
-            .start_session(thread_id, project_path, agent_cmd, None)
+            .enqueue_start_session(thread_id, project_path, agent_cmd, None)
             .await?;
 
         Ok((acp_session_id, thread_id))
@@ -119,7 +129,7 @@ impl DaemonHandle {
     /// Restore a previously persisted session. Skips topic creation since the topic already exists.
     pub async fn restore_session(&self, info: &SessionInfo) -> Result<()> {
         let acp_session_id = self
-            .start_session(
+            .enqueue_start_session(
                 info.thread_id,
                 info.project_path.clone(),
                 info.agent_command.clone(),
@@ -146,8 +156,32 @@ impl DaemonHandle {
     }
 
     /// Common logic for starting a session (new or restored).
+    async fn enqueue_start_session(
+        &self,
+        thread_id: i32,
+        project_path: PathBuf,
+        agent_cmd: String,
+        existing_acp_session_id: Option<String>,
+    ) -> Result<String> {
+        let (result_tx, result_rx) = oneshot::channel();
+        self.local_start_tx
+            .send(StartSessionRequest {
+                thread_id,
+                project_path,
+                agent_cmd,
+                existing_acp_session_id,
+                result_tx,
+            })
+            .map_err(|_| anyhow::anyhow!("Daemon session starter is unavailable"))?;
+
+        result_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("Daemon session starter task exited"))?
+    }
+
+    /// Common logic for starting a session (new or restored).
     /// Spawns event consumer and agent task, waits for ACP init, inserts into DashMap.
-    async fn start_session(
+    async fn start_session_local(
         &self,
         thread_id: i32,
         project_path: PathBuf,
@@ -275,13 +309,15 @@ async fn init_agent(
     acp::SessionBootstrap,
 )> {
     let is_loading = Arc::new(AtomicBool::new(existing_acp_session_id.is_some()));
+    let io_event_tx = event_tx.clone();
 
     let (conn, child, handle_io) =
         acp::spawn_agent(agent_cmd, project_path, event_tx, is_loading.clone())?;
 
-    tokio::task::spawn_local(async {
+    tokio::task::spawn_local(async move {
         if let Err(e) = handle_io.await {
             tracing::error!("ACP IO error: {e}");
+            let _ = io_event_tx.send(AgentEvent::Error(format!("Agent connection error: {e}")));
         }
     });
 
@@ -302,12 +338,29 @@ pub async fn run_daemon(config: Config) -> Result<()> {
 
     let bot = Bot::new(&config.bot_token);
     let telegraph = crate::telegraph::create_account(config.telegraph_author.as_deref()).await?;
+    let (local_start_tx, mut local_start_rx) = mpsc::unbounded_channel::<StartSessionRequest>();
 
     let daemon = Arc::new(DaemonHandle {
         config: config.clone(),
         bot: bot.clone(),
         telegraph,
+        local_start_tx,
         sessions: DashMap::new(),
+    });
+
+    let local_daemon = daemon.clone();
+    tokio::task::spawn_local(async move {
+        while let Some(req) = local_start_rx.recv().await {
+            let res = local_daemon
+                .start_session_local(
+                    req.thread_id,
+                    req.project_path,
+                    req.agent_cmd,
+                    req.existing_acp_session_id,
+                )
+                .await;
+            let _ = req.result_tx.send(res);
+        }
     });
 
     // Restore persisted sessions
