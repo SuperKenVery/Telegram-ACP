@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use dashmap::DashMap;
+use futures::future::join_all;
 use telegraph_rs::Telegraph;
 use teloxide::prelude::*;
 use tokio::sync::{mpsc, oneshot};
@@ -351,15 +352,18 @@ pub async fn run_daemon(config: Config) -> Result<()> {
     let local_daemon = daemon.clone();
     tokio::task::spawn_local(async move {
         while let Some(req) = local_start_rx.recv().await {
-            let res = local_daemon
-                .start_session_local(
-                    req.thread_id,
-                    req.project_path,
-                    req.agent_cmd,
-                    req.existing_acp_session_id,
-                )
-                .await;
-            let _ = req.result_tx.send(res);
+            let local_daemon = local_daemon.clone();
+            tokio::task::spawn_local(async move {
+                let res = local_daemon
+                    .start_session_local(
+                        req.thread_id,
+                        req.project_path,
+                        req.agent_cmd,
+                        req.existing_acp_session_id,
+                    )
+                    .await;
+                let _ = req.result_tx.send(res);
+            });
         }
     });
 
@@ -367,8 +371,16 @@ pub async fn run_daemon(config: Config) -> Result<()> {
     let persisted = persistence::load_sessions();
     if !persisted.is_empty() {
         tracing::info!("Restoring {} persisted session(s)", persisted.len());
-        for info in &persisted {
-            if let Err(e) = daemon.restore_session(info).await {
+        let restore_results = join_all(persisted.into_iter().map(|info| {
+            let daemon = daemon.clone();
+            async move {
+                let restore_result = daemon.restore_session(&info).await;
+                (info, restore_result)
+            }
+        }))
+        .await;
+        for (info, restore_result) in restore_results {
+            if let Err(e) = restore_result {
                 tracing::error!(
                     "Failed to restore session for {} (thread {}): {e}",
                     info.project_path.display(),
