@@ -14,12 +14,14 @@ mod model;
 mod new;
 mod permission;
 mod rename;
+mod remove;
 
 use cancel::CancelCommand;
 use model::ModelCommand;
 use new::NewCommand;
 use permission::PermissionCommand;
 use rename::RenameCommand;
+use remove::RemoveCommand;
 
 pub struct CommandContext<'a> {
     pub bot: &'a Bot,
@@ -43,6 +45,7 @@ fn command_registry() -> Vec<Box<dyn Command>> {
         Box::new(ModelCommand),
         Box::new(PermissionCommand),
         Box::new(RenameCommand),
+        Box::new(RemoveCommand),
     ]
 }
 

@@ -92,6 +92,13 @@ impl DaemonHandle {
             .map_err(|_| anyhow::anyhow!("Cancel request dropped"))?
     }
 
+    /// Remove a session from in-memory state and persisted storage.
+    pub async fn remove_session(&self, thread_id: i32) -> Option<SessionEntry> {
+        let (_, entry) = self.sessions.remove(&thread_id)?;
+        self.persist_sessions().await;
+        Some(entry)
+    }
+
     pub fn get_session_command_tx_by_thread(
         &self,
         thread_id: i32,
@@ -166,9 +173,39 @@ impl DaemonHandle {
             .await?;
         let thread_id = topic.thread_id.0 .0;
 
-        let acp_session_id = self
+        let acp_session_id = match self
             .enqueue_start_session(thread_id, project_path, agent_cmd, None)
-            .await?;
+            .await
+        {
+            Ok(session_id) => session_id,
+            Err(e) => {
+                let delete_result = self
+                    .bot
+                    .delete_forum_topic(
+                        ChatId(self.config.chat_id),
+                        teloxide::types::ThreadId(teloxide::types::MessageId(thread_id)),
+                    )
+                    .await;
+                if let Err(delete_err) = delete_result {
+                    tracing::warn!(
+                        "Failed to delete forum topic {} after ACP init failure: {}",
+                        thread_id,
+                        delete_err
+                    );
+                }
+                let _ = self
+                    .bot
+                    .send_message(
+                        ChatId(self.config.chat_id),
+                        format!(
+                            "Failed to initialize ACP session for '{}' (topic {}). Topic was removed. Error: {}",
+                            path, thread_id, e
+                        ),
+                    )
+                    .await;
+                return Err(e);
+            }
+        };
 
         Ok((acp_session_id, thread_id))
     }
