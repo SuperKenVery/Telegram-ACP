@@ -9,11 +9,44 @@ use teloxide::types::{
     ParseMode, Recipient, ThreadId,
 };
 use tokio::sync::mpsc;
+use tokio::time::{sleep_until, Duration, Instant};
 
 use crate::commands;
 use crate::daemon::DaemonHandle;
 use crate::formatting;
 use crate::types::AgentEvent;
+
+struct OutboundThrottle {
+    min_interval: Duration,
+    next_allowed_at: Instant,
+}
+
+impl OutboundThrottle {
+    fn per_second(count: u64) -> Self {
+        let min_interval = Duration::from_secs_f64(1.0 / count as f64);
+        Self {
+            min_interval,
+            next_allowed_at: Instant::now(),
+        }
+    }
+
+    async fn wait_turn(&mut self) {
+        let now = Instant::now();
+        if self.next_allowed_at > now {
+            sleep_until(self.next_allowed_at).await;
+        }
+        self.next_allowed_at = Instant::now() + self.min_interval;
+    }
+
+    fn try_turn(&mut self) -> bool {
+        let now = Instant::now();
+        if self.next_allowed_at > now {
+            return false;
+        }
+        self.next_allowed_at = now + self.min_interval;
+        true
+    }
+}
 
 /// Send a message draft (streaming partial text) via the raw Telegram Bot API.
 /// Uses `sendMessageDraft` (Bot API 9.3+). Returns Ok(()) on success.
@@ -23,7 +56,13 @@ async fn send_message_draft(
     thread_id: i32,
     draft_id: i64,
     text: &str,
+    throttle: &mut OutboundThrottle,
 ) -> anyhow::Result<()> {
+    // Coalesce frequent streaming updates: if we are inside the 1s window,
+    // skip this send and let the next allowed update publish full draft text.
+    if !throttle.try_turn() {
+        return Ok(());
+    }
     let client = bot.client();
     let token = bot.token();
     let url = format!("https://api.telegram.org/bot{token}/sendMessageDraft");
@@ -198,6 +237,7 @@ async fn flush_draft(
     thread_id: i32,
     draft: &mut Option<DraftState>,
     disable_notification: bool,
+    throttle: &mut OutboundThrottle,
 ) {
     if let Some(d) = draft.take() {
         if d.text.is_empty() {
@@ -209,6 +249,7 @@ async fn flush_draft(
         let finalized_text = fix_md_for_telegram(&formatted);
         let chunks = formatting::split_message(&finalized_text, 4096);
         for chunk in chunks {
+            throttle.wait_turn().await;
             let send_result = bot
                 .send_message(chat_id, chunk.clone())
                 .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
@@ -228,6 +269,7 @@ async fn flush_draft(
                 let safe_text = formatting::escape_markdown_v2(&chunk);
                 let safe_chunks = formatting::split_message(&safe_text, 4096);
                 for safe_chunk in safe_chunks {
+                    throttle.wait_turn().await;
                     if let Err(e) = bot
                         .send_message(chat_id, safe_chunk)
                         .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
@@ -253,8 +295,10 @@ async fn delete_working_msg(
     bot: &Bot,
     chat_id: ChatId,
     working_msg_id: &mut Option<teloxide::types::MessageId>,
+    throttle: &mut OutboundThrottle,
 ) {
     if let Some(msg_id) = working_msg_id.take() {
+        throttle.wait_turn().await;
         let _ = bot.delete_message(chat_id, msg_id).await;
     }
 }
@@ -272,6 +316,7 @@ pub async fn run_event_consumer(
     let mut message_count = 0u32;
     let mut draft: Option<DraftState> = None;
     let mut tool_call_messages: HashMap<String, ToolCallMessageState> = HashMap::new();
+    let mut throttle = OutboundThrottle::per_second(1);
     // Message ID of the "Working on it..." indicator, to delete when a real event arrives.
     let mut working_msg_id: Option<teloxide::types::MessageId> = None;
 
@@ -283,7 +328,7 @@ pub async fn run_event_consumer(
                     continue;
                 }
                 // Delete the "working" indicator on first real content
-                delete_working_msg(&bot, chat_id, &mut working_msg_id).await;
+                delete_working_msg(&bot, chat_id, &mut working_msg_id, &mut throttle).await;
 
                 // Accumulate text into the current draft, or start a new one
                 let d = draft.get_or_insert_with(|| DraftState {
@@ -295,8 +340,15 @@ pub async fn run_event_consumer(
                 // Stream the partial text via sendMessageDraft (best-effort)
                 let escaped_draft_text = fix_md_for_telegram(&d.text);
                 if let Err(e) =
-                    send_message_draft(&bot, chat_id, thread_id, d.draft_id, &escaped_draft_text)
-                        .await
+                    send_message_draft(
+                        &bot,
+                        chat_id,
+                        thread_id,
+                        d.draft_id,
+                        &escaped_draft_text,
+                        &mut throttle,
+                    )
+                    .await
                 {
                     tracing::warn!(
                         chat_id = chat_id.0,
@@ -311,7 +363,15 @@ pub async fn run_event_consumer(
             _ => {
                 // Non-text event: flush any accumulated draft first
                 let disable_notification = message_count > 0;
-                flush_draft(&bot, chat_id, thread_id, &mut draft, disable_notification).await;
+                flush_draft(
+                    &bot,
+                    chat_id,
+                    thread_id,
+                    &mut draft,
+                    disable_notification,
+                    &mut throttle,
+                )
+                .await;
                 if message_count == 0 {
                     message_count += 1;
                 }
@@ -320,7 +380,7 @@ pub async fn run_event_consumer(
 
         // Delete the "working" indicator before sending any non-Working event
         if !matches!(event, AgentEvent::Working) {
-            delete_working_msg(&bot, chat_id, &mut working_msg_id).await;
+            delete_working_msg(&bot, chat_id, &mut working_msg_id, &mut throttle).await;
         }
 
         match event {
@@ -328,6 +388,7 @@ pub async fn run_event_consumer(
                 let text = "⏳ _Working on it\\.\\.\\._".to_string();
                 let disable_notification = message_count > 0;
                 message_count += 1;
+                throttle.wait_turn().await;
                 let result = bot
                     .send_message(chat_id, &text)
                     .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
@@ -347,6 +408,7 @@ pub async fn run_event_consumer(
                 let text = formatting::format_tool_call(&name, kind, status, details.as_deref());
                 let disable_notification = message_count > 0;
                 message_count += 1;
+                throttle.wait_turn().await;
                 if let Ok(sent) = bot
                     .send_message(chat_id, &text)
                     .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
@@ -406,6 +468,7 @@ pub async fn run_event_consumer(
                 );
 
                 if let Some(state) = tool_call_messages.get_mut(&id) {
+                    throttle.wait_turn().await;
                     if bot
                         .edit_message_text(chat_id, state.msg_id, text.clone())
                         .parse_mode(ParseMode::MarkdownV2)
@@ -431,6 +494,7 @@ pub async fn run_event_consumer(
                 // Fallback: if edit fails or we don't have prior tool-call message, send a new one.
                 let disable_notification = message_count > 0;
                 message_count += 1;
+                throttle.wait_turn().await;
                 if let Ok(sent) = bot
                     .send_message(chat_id, &text)
                     .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
@@ -456,6 +520,7 @@ pub async fn run_event_consumer(
                 let disable_notification = message_count > 0;
                 message_count += 1;
                 for chunk in chunks {
+                    throttle.wait_turn().await;
                     let _ = bot
                         .send_message(chat_id, &chunk)
                         .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
@@ -470,6 +535,7 @@ pub async fn run_event_consumer(
                 let chunks = formatting::split_message(&text, 4096);
                 let disable_notification = false;
                 for chunk in chunks {
+                    throttle.wait_turn().await;
                     let _ = bot
                         .send_message(chat_id, &chunk)
                         .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
@@ -485,6 +551,7 @@ pub async fn run_event_consumer(
                 let chunks = formatting::split_message(&text, 4096);
                 let disable_notification = false;
                 for chunk in chunks {
+                    throttle.wait_turn().await;
                     let _ = bot
                         .send_message(chat_id, &chunk)
                         .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
@@ -499,7 +566,8 @@ pub async fn run_event_consumer(
     }
 
     // Channel closed — session is done. Flush any remaining draft and close the topic.
-    flush_draft(&bot, chat_id, thread_id, &mut draft, true).await;
+    flush_draft(&bot, chat_id, thread_id, &mut draft, true, &mut throttle).await;
+    throttle.wait_turn().await;
     let _ = bot
         .close_forum_topic(chat_id, ThreadId(teloxide::types::MessageId(thread_id)))
         .await;
