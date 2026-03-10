@@ -138,30 +138,28 @@ fn escape_markdown_v2_code(text: &str) -> String {
 }
 
 fn format_tool_header(name: &str, kind: acp::ToolKind, status: acp::ToolCallStatus) -> String {
-    let (status_icon, status_label) = match status {
-        acp::ToolCallStatus::Pending => ("⏳", "pending"),
-        acp::ToolCallStatus::InProgress => ("🔄", "in_progress"),
-        acp::ToolCallStatus::Completed => ("✅", "completed"),
-        acp::ToolCallStatus::Failed => ("❌", "failed"),
-        _ => ("⏳", "pending"),
+    let status_icon = match status {
+        acp::ToolCallStatus::Pending => "⏳",
+        acp::ToolCallStatus::InProgress => "🔄",
+        acp::ToolCallStatus::Completed => "✅",
+        acp::ToolCallStatus::Failed => "❌",
+        _ => "⏳",
     };
-    let (kind_icon, kind_label) = match kind {
-        acp::ToolKind::Read => ("📖", "read"),
-        acp::ToolKind::Edit => ("✏️", "edit"),
-        acp::ToolKind::Delete => ("🗑️", "delete"),
-        acp::ToolKind::Move => ("📦", "move"),
-        acp::ToolKind::Search => ("🔍", "search"),
-        acp::ToolKind::Execute => ("▶️", "execute"),
-        acp::ToolKind::Think => ("🧠", "think"),
-        acp::ToolKind::Fetch => ("🌐", "fetch"),
-        acp::ToolKind::Other => ("🛠️", "other"),
-        _ => ("🛠️", "other"),
+    let kind_icon = match kind {
+        acp::ToolKind::Read => "📖",
+        acp::ToolKind::Edit => "✏️",
+        acp::ToolKind::Delete => "🗑️",
+        acp::ToolKind::Move => "📦",
+        acp::ToolKind::Search => "🔍",
+        acp::ToolKind::Execute => "▶️",
+        acp::ToolKind::Think => "🧠",
+        acp::ToolKind::Fetch => "🌐",
+        acp::ToolKind::Other => "🛠️",
+        _ => "🛠️",
     };
     format!(
-        "{status_icon} {kind_icon} *Tool:* `{}`\n*Type:* `{}`\n*Status:* `{}`",
-        escape_markdown_v2_code(name),
-        escape_markdown_v2_code(kind_label),
-        escape_markdown_v2_code(status_label)
+        "{status_icon} {kind_icon} *Tool:* `{}`",
+        escape_markdown_v2_code(name)
     )
 }
 
