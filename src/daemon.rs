@@ -1,4 +1,3 @@
-use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -35,7 +34,6 @@ pub struct SessionEntry {
     pub project_path: PathBuf,
     pub agent_command: String,
     pub status: Arc<tokio::sync::Mutex<SessionStatus>>,
-    pub pending_prompts: Arc<tokio::sync::Mutex<VecDeque<String>>>,
     pub command_tx: mpsc::UnboundedSender<SessionCommand>,
     pub cancel_tx: mpsc::UnboundedSender<oneshot::Sender<Result<()>>>,
 }
@@ -49,34 +47,6 @@ struct StartSessionRequest {
 }
 
 impl DaemonHandle {
-    pub async fn enqueue_user_prompt(
-        &self,
-        thread_id: i32,
-        text: String,
-    ) -> Result<Option<Vec<String>>> {
-        let entry = self
-            .sessions
-            .get(&thread_id)
-            .ok_or_else(|| anyhow::anyhow!("No active session in this topic"))?;
-        let is_prompting = {
-            let status = *entry.status.lock().await;
-            status == SessionStatus::Prompting
-        };
-        let queued = if is_prompting {
-            let mut pending = entry.pending_prompts.lock().await;
-            pending.push_back(text.clone());
-            Some(pending.iter().cloned().collect())
-        } else {
-            None
-        };
-
-        entry
-            .command_tx
-            .send(SessionCommand::Prompt(text))
-            .map_err(|_| anyhow::anyhow!("Session command channel closed"))?;
-        Ok(queued)
-    }
-
     pub async fn cancel_session(&self, thread_id: i32) -> Result<()> {
         let entry = self
             .sessions
@@ -278,12 +248,11 @@ impl DaemonHandle {
         let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentEvent>();
 
         let status = Arc::new(tokio::sync::Mutex::new(SessionStatus::Initializing));
-        let pending_prompts = Arc::new(tokio::sync::Mutex::new(VecDeque::new()));
 
         // Spawn the event consumer within LocalSet.
         let bot = self.bot.clone();
         let chat_id = ChatId(self.config.chat_id);
-        tokio::task::spawn_local(telegram::run_event_consumer(
+        tokio::task::spawn_local(session::run_event_consumer(
             bot, chat_id, thread_id, event_rx,
         ));
 
@@ -298,7 +267,9 @@ impl DaemonHandle {
             command_rx,
             cancel_rx,
             status.clone(),
-            pending_prompts.clone(),
+            self.bot.clone(),
+            ChatId(self.config.chat_id),
+            thread_id,
             existing_acp_session_id,
             result_tx,
         ));
@@ -314,7 +285,6 @@ impl DaemonHandle {
                 project_path,
                 agent_command: agent_cmd,
                 status,
-                pending_prompts,
                 command_tx,
                 cancel_tx,
             },
@@ -328,7 +298,7 @@ impl DaemonHandle {
 }
 
 /// Init phase: spawn agent, initialize/resume ACP session, send result back via oneshot.
-/// Run phase: enter prompt loop (continues in same task).
+/// Run phase: enter session runtime (continues in same task).
 async fn spawn_and_run_agent(
     agent_cmd: String,
     project_path: PathBuf,
@@ -336,7 +306,9 @@ async fn spawn_and_run_agent(
     command_rx: mpsc::UnboundedReceiver<SessionCommand>,
     cancel_rx: mpsc::UnboundedReceiver<oneshot::Sender<Result<()>>>,
     status: Arc<tokio::sync::Mutex<SessionStatus>>,
-    pending_prompts: Arc<tokio::sync::Mutex<VecDeque<String>>>,
+    bot: Bot,
+    chat_id: ChatId,
+    thread_id: i32,
     existing_acp_session_id: Option<String>,
     result_tx: oneshot::Sender<Result<String>>,
 ) {
@@ -362,20 +334,18 @@ async fn spawn_and_run_agent(
                 *s = SessionStatus::Idle;
             }
 
-            // Run the prompt loop
+            // Run the session runtime
             let conn = Arc::new(conn);
-            tokio::task::spawn_local(session::run_cancel_loop(
-                conn.clone(),
-                bootstrap.session_id.clone(),
-                cancel_rx,
-            ));
-            session::run_prompt_loop(
+            session::run_session_runtime(
                 conn,
                 bootstrap.session_id,
+                bot,
+                chat_id,
+                thread_id,
                 command_rx,
+                cancel_rx,
                 event_tx,
                 status,
-                pending_prompts,
                 bootstrap.modes,
                 bootstrap.config_options,
             )

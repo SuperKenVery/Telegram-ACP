@@ -13,15 +13,15 @@ mod cancel;
 mod model;
 mod new;
 mod permission;
-mod rename;
 mod remove;
+mod rename;
 
 use cancel::CancelCommand;
 use model::ModelCommand;
 use new::NewCommand;
 use permission::PermissionCommand;
-use rename::RenameCommand;
 use remove::RemoveCommand;
+use rename::RenameCommand;
 
 pub struct CommandContext<'a> {
     pub bot: &'a Bot,
