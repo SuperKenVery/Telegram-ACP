@@ -1,7 +1,8 @@
 use acp::Agent;
 use agent_client_protocol as acp;
+use std::collections::VecDeque;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::session_control::{build_control_state, SessionCommand};
 use crate::types::{AgentEvent, SessionStatus};
@@ -14,12 +15,21 @@ pub async fn run_prompt_loop(
     mut command_rx: mpsc::UnboundedReceiver<SessionCommand>,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
     status: Arc<Mutex<SessionStatus>>,
+    pending_prompts: Arc<Mutex<VecDeque<String>>>,
     mut mode_state: Option<acp::SessionModeState>,
     mut config_options: Vec<acp::SessionConfigOption>,
 ) {
     while let Some(cmd) = command_rx.recv().await {
         match cmd {
             SessionCommand::Prompt(user_text) => {
+                // If this prompt came from the queued backlog, drop it from the in-memory queue.
+                {
+                    let mut pending = pending_prompts.lock().await;
+                    if pending.front().is_some_and(|front| front == &user_text) {
+                        pending.pop_front();
+                    }
+                }
+
                 {
                     let mut s = status.lock().await;
                     *s = SessionStatus::Prompting;
@@ -96,4 +106,18 @@ pub async fn run_prompt_loop(
     // Channel closed, session is done
     let mut s = status.lock().await;
     *s = SessionStatus::Finished;
+}
+
+pub async fn run_cancel_loop(
+    conn: Arc<acp::ClientSideConnection>,
+    acp_session_id: acp::SessionId,
+    mut cancel_rx: mpsc::UnboundedReceiver<oneshot::Sender<anyhow::Result<()>>>,
+) {
+    while let Some(result_tx) = cancel_rx.recv().await {
+        let result = conn
+            .cancel(acp::CancelNotification::new(acp_session_id.clone()))
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to cancel session: {e}"));
+        let _ = result_tx.send(result);
+    }
 }

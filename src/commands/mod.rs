@@ -9,11 +9,13 @@ use tokio::sync::oneshot;
 use crate::daemon::DaemonHandle;
 use crate::session_control::{SessionCommand, SessionControlState};
 
+mod cancel;
 mod model;
 mod new;
 mod permission;
 mod rename;
 
+use cancel::CancelCommand;
 use model::ModelCommand;
 use new::NewCommand;
 use permission::PermissionCommand;
@@ -36,6 +38,7 @@ pub trait Command: Send + Sync {
 fn command_registry() -> Vec<Box<dyn Command>> {
     vec![
         Box::new(NewCommand),
+        Box::new(CancelCommand),
         Box::new(ModelCommand),
         Box::new(PermissionCommand),
         Box::new(RenameCommand),
@@ -133,6 +136,10 @@ pub async fn handle_callback_query(
         return Ok(());
     }
 
+    if cancel::try_handle_callback(&bot, &query, &daemon).await? {
+        return Ok(());
+    }
+
     bot.answer_callback_query(query.id)
         .text("Unsupported action")
         .await?;
@@ -196,4 +203,8 @@ pub(super) async fn set_config_option(
         .context("Failed to send model selection request")?;
 
     result_rx.await.context("Model selection request dropped")?
+}
+
+pub(super) async fn cancel_prompt(daemon: &DaemonHandle, thread_id: i32) -> Result<()> {
+    daemon.cancel_session(thread_id).await
 }

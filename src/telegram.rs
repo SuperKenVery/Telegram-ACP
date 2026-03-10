@@ -2,13 +2,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use teloxide::prelude::*;
-use teloxide::types::{CallbackQuery, MessageId, ParseMode, ThreadId};
+use teloxide::types::{
+    CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, MessageId, ParseMode, ThreadId,
+};
 use tokio::sync::mpsc;
 
 use crate::commands;
 use crate::daemon::DaemonHandle;
 use crate::formatting;
-use crate::session_control::SessionCommand;
 use crate::types::AgentEvent;
 
 /// Send a message draft (streaming partial text) via the raw Telegram Bot API.
@@ -87,7 +88,7 @@ async fn handle_message(bot: Bot, msg: Message, daemon: Arc<DaemonHandle>) -> an
     // Handle messages in forum topics -> route to session
     if let Some(thread_id) = msg.thread_id {
         if let Some(text) = msg.text() {
-            handle_topic_message(text, thread_id, &daemon).await?;
+            handle_topic_message(&bot, text, thread_id, &daemon).await?;
         }
     }
 
@@ -96,14 +97,58 @@ async fn handle_message(bot: Bot, msg: Message, daemon: Arc<DaemonHandle>) -> an
 
 /// Handle a message in a forum topic, routing it to the corresponding agent session.
 async fn handle_topic_message(
+    bot: &Bot,
     text: &str,
     thread_id: ThreadId,
     daemon: &DaemonHandle,
 ) -> anyhow::Result<()> {
-    if let Some(command_tx) = daemon.get_session_command_tx_by_thread(thread_id.0 .0) {
-        let _ = command_tx.send(SessionCommand::Prompt(text.to_string()));
+    let thread = thread_id.0 .0;
+    if daemon.get_session_command_tx_by_thread(thread).is_none() {
+        return Ok(());
+    }
+
+    if let Some(queued_prompts) = daemon.enqueue_user_prompt(thread, text.to_string()).await? {
+        send_queued_notice(bot, daemon.config.chat_id, thread, &queued_prompts).await;
     }
     Ok(())
+}
+
+fn build_interrupt_callback_data(thread_id: i32) -> String {
+    format!("cancelq:{thread_id}")
+}
+
+async fn send_queued_notice(bot: &Bot, chat_id: i64, thread_id: i32, queued_prompts: &[String]) {
+    let mut lines = Vec::with_capacity(queued_prompts.len() + 2);
+    lines.push("Agent is currently working.".to_string());
+    lines.push("Your message was queued. Pending queue:".to_string());
+    for (idx, prompt) in queued_prompts.iter().enumerate() {
+        lines.push(format!("{}. {}", idx + 1, prompt));
+    }
+    let text = lines.join("\n");
+    let chunks = formatting::split_message(&text, 4096);
+    let callback_data = build_interrupt_callback_data(thread_id);
+    let keyboard = InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::callback(
+        "Interrupt and run queued now",
+        callback_data,
+    )]]);
+
+    let mut iter = chunks.into_iter().peekable();
+    while let Some(chunk) = iter.next() {
+        let mut request = bot
+            .send_message(ChatId(chat_id), chunk)
+            .message_thread_id(ThreadId(MessageId(thread_id)));
+        if iter.peek().is_none() {
+            request = request.reply_markup(keyboard.clone());
+        }
+        if let Err(e) = request.await {
+            tracing::warn!(
+                chat_id = chat_id,
+                thread_id = thread_id,
+                "Failed to send queued notice: {e}"
+            );
+            break;
+        }
+    }
 }
 
 async fn handle_callback_query(

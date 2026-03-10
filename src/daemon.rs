@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -34,7 +35,9 @@ pub struct SessionEntry {
     pub project_path: PathBuf,
     pub agent_command: String,
     pub status: Arc<tokio::sync::Mutex<SessionStatus>>,
+    pub pending_prompts: Arc<tokio::sync::Mutex<VecDeque<String>>>,
     pub command_tx: mpsc::UnboundedSender<SessionCommand>,
+    pub cancel_tx: mpsc::UnboundedSender<oneshot::Sender<Result<()>>>,
 }
 
 struct StartSessionRequest {
@@ -46,6 +49,49 @@ struct StartSessionRequest {
 }
 
 impl DaemonHandle {
+    pub async fn enqueue_user_prompt(
+        &self,
+        thread_id: i32,
+        text: String,
+    ) -> Result<Option<Vec<String>>> {
+        let entry = self
+            .sessions
+            .get(&thread_id)
+            .ok_or_else(|| anyhow::anyhow!("No active session in this topic"))?;
+        let is_prompting = {
+            let status = *entry.status.lock().await;
+            status == SessionStatus::Prompting
+        };
+        let queued = if is_prompting {
+            let mut pending = entry.pending_prompts.lock().await;
+            pending.push_back(text.clone());
+            Some(pending.iter().cloned().collect())
+        } else {
+            None
+        };
+
+        entry
+            .command_tx
+            .send(SessionCommand::Prompt(text))
+            .map_err(|_| anyhow::anyhow!("Session command channel closed"))?;
+        Ok(queued)
+    }
+
+    pub async fn cancel_session(&self, thread_id: i32) -> Result<()> {
+        let entry = self
+            .sessions
+            .get(&thread_id)
+            .ok_or_else(|| anyhow::anyhow!("No active session in this topic"))?;
+        let (result_tx, result_rx) = oneshot::channel();
+        entry
+            .cancel_tx
+            .send(result_tx)
+            .map_err(|_| anyhow::anyhow!("Session cancel channel closed"))?;
+        result_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("Cancel request dropped"))?
+    }
+
     pub fn get_session_command_tx_by_thread(
         &self,
         thread_id: i32,
@@ -191,9 +237,11 @@ impl DaemonHandle {
     ) -> Result<String> {
         // Channels
         let (command_tx, command_rx) = mpsc::unbounded_channel::<SessionCommand>();
+        let (cancel_tx, cancel_rx) = mpsc::unbounded_channel::<oneshot::Sender<Result<()>>>();
         let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentEvent>();
 
         let status = Arc::new(tokio::sync::Mutex::new(SessionStatus::Initializing));
+        let pending_prompts = Arc::new(tokio::sync::Mutex::new(VecDeque::new()));
 
         // Spawn the event consumer within LocalSet.
         let bot = self.bot.clone();
@@ -211,7 +259,9 @@ impl DaemonHandle {
             project_path.clone(),
             event_tx,
             command_rx,
+            cancel_rx,
             status.clone(),
+            pending_prompts.clone(),
             existing_acp_session_id,
             result_tx,
         ));
@@ -227,7 +277,9 @@ impl DaemonHandle {
                 project_path,
                 agent_command: agent_cmd,
                 status,
+                pending_prompts,
                 command_tx,
+                cancel_tx,
             },
         );
 
@@ -245,7 +297,9 @@ async fn spawn_and_run_agent(
     project_path: PathBuf,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
     command_rx: mpsc::UnboundedReceiver<SessionCommand>,
+    cancel_rx: mpsc::UnboundedReceiver<oneshot::Sender<Result<()>>>,
     status: Arc<tokio::sync::Mutex<SessionStatus>>,
+    pending_prompts: Arc<tokio::sync::Mutex<VecDeque<String>>>,
     existing_acp_session_id: Option<String>,
     result_tx: oneshot::Sender<Result<String>>,
 ) {
@@ -273,12 +327,18 @@ async fn spawn_and_run_agent(
 
             // Run the prompt loop
             let conn = Arc::new(conn);
+            tokio::task::spawn_local(session::run_cancel_loop(
+                conn.clone(),
+                bootstrap.session_id.clone(),
+                cancel_rx,
+            ));
             session::run_prompt_loop(
                 conn,
                 bootstrap.session_id,
                 command_rx,
                 event_tx,
                 status,
+                pending_prompts,
                 bootstrap.modes,
                 bootstrap.config_options,
             )
