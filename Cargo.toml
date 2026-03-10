@@ -3,6 +3,14 @@ name = "telegram-acp"
 version = "0.1.0"
 edition = "2021"
 default-run = "telegram-acp"
+license = "MIT"
+repository = "https://github.com/SuperKenVery/telegram-acp"
+description = "Bridge Telegram and ACP coding agents"
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.tar.gz"
+bin-dir = "{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
 
 [dependencies]
 agent-client-protocol = "0.10"
