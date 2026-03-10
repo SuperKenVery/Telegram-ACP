@@ -218,6 +218,13 @@ async fn handle_callback_query(
 struct DraftState {
     draft_id: i64,
     text: String,
+    kind: DraftKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DraftKind {
+    AgentMessage,
+    AgentThought,
 }
 
 /// Tracks which Telegram message corresponds to a tool call id.
@@ -243,7 +250,10 @@ async fn flush_draft(
         if d.text.is_empty() {
             return;
         }
-        let formatted = formatting::format_text_message(&d.text);
+        let formatted = match d.kind {
+            DraftKind::AgentMessage => formatting::format_text_message(&d.text),
+            DraftKind::AgentThought => formatting::format_thought_message(&d.text),
+        };
         // Keep finalize behavior aligned with streaming drafts:
         // normalize/escape agent markdown before sending via MarkdownV2.
         let finalized_text = fix_md_for_telegram(&formatted);
@@ -369,15 +379,83 @@ pub async fn run_event_consumer(
                 // Delete the "working" indicator on first real content
                 delete_working_msg(&bot, chat_id, &mut working_msg_id, &mut throttle).await;
 
+                if matches!(draft.as_ref().map(|d| d.kind), Some(DraftKind::AgentThought)) {
+                    flush_draft(
+                        &bot,
+                        chat_id,
+                        thread_id,
+                        &mut draft,
+                        message_count > 0,
+                        &mut throttle,
+                    )
+                    .await;
+                    if message_count == 0 {
+                        message_count += 1;
+                    }
+                }
+
                 // Accumulate text into the current draft, or start a new one
                 let d = draft.get_or_insert_with(|| DraftState {
                     draft_id: rand_draft_id(),
                     text: String::new(),
+                    kind: DraftKind::AgentMessage,
                 });
                 d.text.push_str(&t);
 
                 // Stream the partial text via sendMessageDraft (best-effort)
-                let escaped_draft_text = fix_md_for_telegram(&d.text);
+                let escaped_draft_text =
+                    fix_md_for_telegram(&formatting::format_text_message(&d.text));
+                if let Err(e) = send_message_draft(
+                    &bot,
+                    chat_id,
+                    thread_id,
+                    d.draft_id,
+                    &escaped_draft_text,
+                    &mut throttle,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        chat_id = chat_id.0,
+                        thread_id = thread_id,
+                        draft_id = d.draft_id,
+                        text_len = d.text.len(),
+                        "sendMessageDraft failed: {e}"
+                    );
+                }
+                continue;
+            }
+            AgentEvent::Update(acp::SessionUpdate::AgentThoughtChunk(chunk)) => {
+                let t = extract_text(&chunk.content);
+                if t.is_empty() {
+                    continue;
+                }
+                delete_working_msg(&bot, chat_id, &mut working_msg_id, &mut throttle).await;
+
+                if matches!(draft.as_ref().map(|d| d.kind), Some(DraftKind::AgentMessage)) {
+                    flush_draft(
+                        &bot,
+                        chat_id,
+                        thread_id,
+                        &mut draft,
+                        message_count > 0,
+                        &mut throttle,
+                    )
+                    .await;
+                    if message_count == 0 {
+                        message_count += 1;
+                    }
+                }
+
+                let d = draft.get_or_insert_with(|| DraftState {
+                    draft_id: rand_draft_id(),
+                    text: String::new(),
+                    kind: DraftKind::AgentThought,
+                });
+                d.text.push_str(&t);
+
+                let escaped_draft_text =
+                    fix_md_for_telegram(&formatting::format_thought_message(&d.text));
                 if let Err(e) = send_message_draft(
                     &bot,
                     chat_id,

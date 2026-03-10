@@ -69,6 +69,7 @@ impl acp::Client for TelegramClient {
         let update = args.update;
         match update {
             acp::SessionUpdate::AgentMessageChunk(_)
+            | acp::SessionUpdate::AgentThoughtChunk(_)
             | acp::SessionUpdate::ToolCall(_)
             | acp::SessionUpdate::ToolCallUpdate(_)
             | acp::SessionUpdate::UsageUpdate(_) => self.send_event(AgentEvent::Update(update)),

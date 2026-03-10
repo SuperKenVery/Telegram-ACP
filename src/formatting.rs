@@ -24,6 +24,16 @@ pub fn format_text_message(text: &str) -> String {
     truncate_message(text, 4096)
 }
 
+/// Format a thought/reasoning message for Telegram.
+pub fn format_thought_message(text: &str) -> String {
+    let prefixed = if text.trim().is_empty() {
+        "💭 _Thought_".to_string()
+    } else {
+        format!("💭 _Thought_\n\n{}", text)
+    };
+    truncate_message(&prefixed, 4096)
+}
+
 /// Format a tool call notification.
 pub fn format_tool_call(
     name: &str,
