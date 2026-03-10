@@ -1,7 +1,6 @@
 use acp::Agent;
 use agent_client_protocol as acp;
 use anyhow::Result;
-use similar::TextDiff;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -67,140 +66,18 @@ impl acp::Client for TelegramClient {
             return Ok(());
         }
 
-        match args.update {
-            acp::SessionUpdate::AgentMessageChunk(chunk) => {
-                let text = extract_text(&chunk.content);
-                if !text.is_empty() {
-                    self.send_event(AgentEvent::TextMessage(text));
-                }
-            }
-            acp::SessionUpdate::ToolCall(tool_call) => {
-                let details = extract_tool_details(&tool_call.content);
-                self.send_event(AgentEvent::ToolCall {
-                    id: tool_call.tool_call_id.to_string(),
-                    name: tool_call.title.clone(),
-                    details,
-                });
-            }
-            acp::SessionUpdate::ToolCallUpdate(update) => {
-                let fields = update.fields;
-                let output = fields
-                    .content
-                    .as_ref()
-                    .and_then(|contents| extract_tool_output(contents));
-                let details = extract_tool_details(fields.content.as_deref().unwrap_or(&[]));
-                let title = fields.title.unwrap_or_default();
-                self.send_event(AgentEvent::ToolCallUpdate {
-                    id: update.tool_call_id.to_string(),
-                    name: title,
-                    output,
-                    details,
-                });
-            }
-            acp::SessionUpdate::UsageUpdate(usage) => {
-                self.send_event(AgentEvent::TextMessage(format_usage_update(&usage)));
-            }
+        let update = args.update;
+        match update {
+            acp::SessionUpdate::AgentMessageChunk(_)
+            | acp::SessionUpdate::ToolCall(_)
+            | acp::SessionUpdate::ToolCallUpdate(_)
+            | acp::SessionUpdate::UsageUpdate(_) => self.send_event(AgentEvent::Update(update)),
             _ => {
                 // Ignore other notification types (Plan, UserMessageChunk, etc.)
             }
         }
         Ok(())
     }
-}
-
-fn extract_text(content: &acp::ContentBlock) -> String {
-    match content {
-        acp::ContentBlock::Text(tc) => tc.text.clone(),
-        _ => String::new(),
-    }
-}
-
-fn extract_tool_output(contents: &[acp::ToolCallContent]) -> Option<String> {
-    let mut parts = Vec::new();
-    for content in contents {
-        match content {
-            acp::ToolCallContent::Content(content) => {
-                let text = extract_text(&content.content);
-                if !text.trim().is_empty() {
-                    parts.push(text);
-                }
-            }
-            acp::ToolCallContent::Diff(diff) => {
-                parts.push(format_unified_diff(
-                    Some(diff.path.display().to_string()),
-                    diff.old_text.as_deref(),
-                    &diff.new_text,
-                ));
-            }
-            _ => {}
-        }
-    }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join("\n\n"))
-    }
-}
-
-fn extract_tool_details(contents: &[acp::ToolCallContent]) -> Option<String> {
-    extract_diff_details(contents)
-}
-
-fn extract_diff_details(contents: &[acp::ToolCallContent]) -> Option<String> {
-    let diffs: Vec<String> = contents
-        .iter()
-        .filter_map(|content| match content {
-            acp::ToolCallContent::Diff(diff) => Some(format_unified_diff(
-                Some(diff.path.display().to_string()),
-                diff.old_text.as_deref(),
-                &diff.new_text,
-            )),
-            _ => None,
-        })
-        .collect();
-
-    if diffs.is_empty() {
-        None
-    } else {
-        Some(diffs.join("\n\n"))
-    }
-}
-
-fn format_unified_diff(path: Option<String>, old_text: Option<&str>, new_text: &str) -> String {
-    let old = old_text.unwrap_or("");
-    let path = path.unwrap_or_else(|| "file".to_string());
-    let old_header = format!("a/{path}");
-    let new_header = format!("b/{path}");
-    let unified = TextDiff::from_lines(old, new_text)
-        .unified_diff()
-        .context_radius(2)
-        .header(&old_header, &new_header)
-        .to_string();
-
-    if unified.trim().is_empty() {
-        format!("--- {old_header}\n+++ {new_header}\n(no changes)")
-    } else {
-        unified
-    }
-}
-
-fn format_usage_update(usage: &acp::UsageUpdate) -> String {
-    let percent = if usage.size == 0 {
-        0.0
-    } else {
-        (usage.used as f64 / usage.size as f64) * 100.0
-    };
-
-    let cost = usage
-        .cost
-        .as_ref()
-        .map(|c| format!(", cost {:.4} {}", c.amount, c.currency))
-        .unwrap_or_default();
-
-    format!(
-        "Usage update: {}/{} tokens ({percent:.1}%){}",
-        usage.used, usage.size, cost
-    )
 }
 
 /// Spawn an ACP agent subprocess and return the connection + child handle.

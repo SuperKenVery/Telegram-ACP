@@ -1,3 +1,4 @@
+use agent_client_protocol as acp;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -53,18 +54,7 @@ pub enum SessionStatus {
 #[allow(dead_code)]
 pub enum AgentEvent {
     Working,
-    TextMessage(String),
-    ToolCall {
-        id: String,
-        name: String,
-        details: Option<String>,
-    },
-    ToolCallUpdate {
-        id: String,
-        name: String,
-        output: Option<String>,
-        details: Option<String>,
-    },
+    Update(acp::SessionUpdate),
     Finished(String),
     Error(String),
 }

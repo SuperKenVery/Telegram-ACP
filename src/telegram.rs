@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use agent_client_protocol as acp;
+use similar::TextDiff;
 use teloxide::prelude::*;
 use teloxide::types::{
     BotCommandScope, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, MessageId,
@@ -183,6 +185,8 @@ struct DraftState {
 struct ToolCallMessageState {
     msg_id: MessageId,
     name: String,
+    kind: acp::ToolKind,
+    status: acp::ToolCallStatus,
     details: Option<String>,
 }
 
@@ -273,7 +277,11 @@ pub async fn run_event_consumer(
 
     while let Some(event) = event_rx.recv().await {
         match &event {
-            AgentEvent::TextMessage(t) => {
+            AgentEvent::Update(acp::SessionUpdate::AgentMessageChunk(chunk)) => {
+                let t = extract_text(&chunk.content);
+                if t.is_empty() {
+                    continue;
+                }
                 // Delete the "working" indicator on first real content
                 delete_working_msg(&bot, chat_id, &mut working_msg_id).await;
 
@@ -282,7 +290,7 @@ pub async fn run_event_consumer(
                     draft_id: rand_draft_id(),
                     text: String::new(),
                 });
-                d.text.push_str(t);
+                d.text.push_str(&t);
 
                 // Stream the partial text via sendMessageDraft (best-effort)
                 let escaped_draft_text = fix_md_for_telegram(&d.text);
@@ -315,7 +323,7 @@ pub async fn run_event_consumer(
             delete_working_msg(&bot, chat_id, &mut working_msg_id).await;
         }
 
-        match &event {
+        match event {
             AgentEvent::Working => {
                 let text = "⏳ _Working on it\\.\\.\\._".to_string();
                 let disable_notification = message_count > 0;
@@ -330,9 +338,13 @@ pub async fn run_event_consumer(
                     working_msg_id = Some(sent.id);
                 }
             }
-            AgentEvent::TextMessage(_) => unreachable!(),
-            AgentEvent::ToolCall { id, name, details } => {
-                let text = formatting::format_tool_call(name, details.as_deref());
+            AgentEvent::Update(acp::SessionUpdate::ToolCall(tool_call)) => {
+                let id = tool_call.tool_call_id.to_string();
+                let name = tool_call.title;
+                let kind = tool_call.kind;
+                let status = tool_call.status;
+                let details = extract_tool_details(&tool_call.content);
+                let text = formatting::format_tool_call(&name, kind, status, details.as_deref());
                 let disable_notification = message_count > 0;
                 message_count += 1;
                 if let Ok(sent) = bot
@@ -343,41 +355,57 @@ pub async fn run_event_consumer(
                     .await
                 {
                     tool_call_messages.insert(
-                        id.clone(),
+                        id,
                         ToolCallMessageState {
                             msg_id: sent.id,
-                            name: name.clone(),
-                            details: details.clone(),
+                            name,
+                            kind,
+                            status,
+                            details,
                         },
                     );
                 }
             }
-            AgentEvent::ToolCallUpdate {
-                id,
-                name,
-                output,
-                details,
-            } => {
+            AgentEvent::Update(acp::SessionUpdate::ToolCallUpdate(update)) => {
+                let id = update.tool_call_id.to_string();
+                let fields = update.fields;
+                let name = fields.title.unwrap_or_default();
+                let kind = fields.kind;
+                let status = fields.status;
+                let output = fields
+                    .content
+                    .as_ref()
+                    .and_then(|contents| extract_tool_output(contents));
+                let details = extract_tool_details(fields.content.as_deref().unwrap_or(&[]));
+
                 let resolved_name = if !name.is_empty() {
                     name.clone()
                 } else {
                     tool_call_messages
-                        .get(id)
+                        .get(&id)
                         .map(|s| s.name.clone())
                         .unwrap_or_default()
                 };
                 let resolved_details = if details.is_some() {
                     details.clone()
                 } else {
-                    tool_call_messages.get(id).and_then(|s| s.details.clone())
+                    tool_call_messages.get(&id).and_then(|s| s.details.clone())
                 };
+                let resolved_kind = kind
+                    .or_else(|| tool_call_messages.get(&id).map(|s| s.kind))
+                    .unwrap_or(acp::ToolKind::Other);
+                let resolved_status = status
+                    .or_else(|| tool_call_messages.get(&id).map(|s| s.status))
+                    .unwrap_or(acp::ToolCallStatus::Pending);
                 let text = formatting::format_tool_result(
                     &resolved_name,
+                    resolved_kind,
+                    resolved_status,
                     output.as_deref(),
                     resolved_details.as_deref(),
                 );
 
-                if let Some(state) = tool_call_messages.get_mut(id) {
+                if let Some(state) = tool_call_messages.get_mut(&id) {
                     if bot
                         .edit_message_text(chat_id, state.msg_id, text.clone())
                         .parse_mode(ParseMode::MarkdownV2)
@@ -385,10 +413,16 @@ pub async fn run_event_consumer(
                         .is_ok()
                     {
                         if !name.is_empty() {
-                            state.name = name.clone();
+                            state.name = name;
+                        }
+                        if let Some(k) = kind {
+                            state.kind = k;
+                        }
+                        if let Some(s) = status {
+                            state.status = s;
                         }
                         if details.is_some() {
-                            state.details = details.clone();
+                            state.details = details;
                         }
                         continue;
                     }
@@ -405,17 +439,34 @@ pub async fn run_event_consumer(
                     .await
                 {
                     tool_call_messages.insert(
-                        id.clone(),
+                        id,
                         ToolCallMessageState {
                             msg_id: sent.id,
                             name: resolved_name,
+                            kind: resolved_kind,
+                            status: resolved_status,
                             details: resolved_details,
                         },
                     );
                 }
             }
+            AgentEvent::Update(acp::SessionUpdate::UsageUpdate(usage)) => {
+                let text = formatting::format_text_message(&format_usage_update(&usage));
+                let chunks = formatting::split_message(&text, 4096);
+                let disable_notification = message_count > 0;
+                message_count += 1;
+                for chunk in chunks {
+                    let _ = bot
+                        .send_message(chat_id, &chunk)
+                        .message_thread_id(ThreadId(teloxide::types::MessageId(thread_id)))
+                        .parse_mode(ParseMode::MarkdownV2)
+                        .disable_notification(disable_notification)
+                        .await;
+                }
+            }
+            AgentEvent::Update(_) => {}
             AgentEvent::Finished(reason) => {
-                let text = formatting::format_completion(reason, None);
+                let text = formatting::format_completion(&reason, None);
                 let chunks = formatting::split_message(&text, 4096);
                 let disable_notification = false;
                 for chunk in chunks {
@@ -430,7 +481,7 @@ pub async fn run_event_consumer(
                 tool_call_messages.clear();
             }
             AgentEvent::Error(e) => {
-                let text = formatting::format_error(e);
+                let text = formatting::format_error(&e);
                 let chunks = formatting::split_message(&text, 4096);
                 let disable_notification = false;
                 for chunk in chunks {
@@ -452,6 +503,97 @@ pub async fn run_event_consumer(
     let _ = bot
         .close_forum_topic(chat_id, ThreadId(teloxide::types::MessageId(thread_id)))
         .await;
+}
+
+fn extract_text(content: &acp::ContentBlock) -> String {
+    match content {
+        acp::ContentBlock::Text(tc) => tc.text.clone(),
+        _ => String::new(),
+    }
+}
+
+fn extract_tool_output(contents: &[acp::ToolCallContent]) -> Option<String> {
+    let mut parts = Vec::new();
+    for content in contents {
+        match content {
+            acp::ToolCallContent::Content(content) => {
+                let text = extract_text(&content.content);
+                if !text.trim().is_empty() {
+                    parts.push(text);
+                }
+            }
+            acp::ToolCallContent::Diff(diff) => {
+                parts.push(format_unified_diff(
+                    Some(diff.path.display().to_string()),
+                    diff.old_text.as_deref(),
+                    &diff.new_text,
+                ));
+            }
+            _ => {}
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
+}
+
+fn extract_tool_details(contents: &[acp::ToolCallContent]) -> Option<String> {
+    let diffs: Vec<String> = contents
+        .iter()
+        .filter_map(|content| match content {
+            acp::ToolCallContent::Diff(diff) => Some(format_unified_diff(
+                Some(diff.path.display().to_string()),
+                diff.old_text.as_deref(),
+                &diff.new_text,
+            )),
+            _ => None,
+        })
+        .collect();
+
+    if diffs.is_empty() {
+        None
+    } else {
+        Some(diffs.join("\n\n"))
+    }
+}
+
+fn format_unified_diff(path: Option<String>, old_text: Option<&str>, new_text: &str) -> String {
+    let old = old_text.unwrap_or("");
+    let path = path.unwrap_or_else(|| "file".to_string());
+    let old_header = format!("a/{path}");
+    let new_header = format!("b/{path}");
+    let unified = TextDiff::from_lines(old, new_text)
+        .unified_diff()
+        .context_radius(2)
+        .header(&old_header, &new_header)
+        .to_string();
+
+    if unified.trim().is_empty() {
+        format!("--- {old_header}\n+++ {new_header}\n(no changes)")
+    } else {
+        unified
+    }
+}
+
+fn format_usage_update(usage: &acp::UsageUpdate) -> String {
+    let percent = if usage.size == 0 {
+        0.0
+    } else {
+        (usage.used as f64 / usage.size as f64) * 100.0
+    };
+
+    let cost = usage
+        .cost
+        .as_ref()
+        .map(|c| format!(", cost {:.4} {}", c.amount, c.currency))
+        .unwrap_or_default();
+
+    format!(
+        "Usage update: {}/{} tokens ({percent:.1}%){}",
+        usage.used, usage.size, cost
+    )
 }
 
 /// Generate a random i64 to use as a draft_id.

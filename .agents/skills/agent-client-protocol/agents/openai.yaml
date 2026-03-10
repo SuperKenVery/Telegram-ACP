@@ -1,0 +1,3 @@
+interface:
+  display_name: "Agent Client Protocol"
+  short_description: "Map ACP events to correct UI behavior"

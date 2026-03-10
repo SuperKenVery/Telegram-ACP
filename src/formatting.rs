@@ -1,3 +1,5 @@
+use agent_client_protocol as acp;
+
 /// MarkdownV2 formatting utilities for Telegram messages.
 
 /// Escape text for Telegram MarkdownV2 parse mode.
@@ -23,8 +25,13 @@ pub fn format_text_message(text: &str) -> String {
 }
 
 /// Format a tool call notification.
-pub fn format_tool_call(name: &str, details: Option<&str>) -> String {
-    let header = format!("🔧 *Tool:* `{}`", escape_markdown_v2_code(name));
+pub fn format_tool_call(
+    name: &str,
+    kind: acp::ToolKind,
+    status: acp::ToolCallStatus,
+    details: Option<&str>,
+) -> String {
+    let header = format_tool_header(name, kind, status);
     match details {
         Some(body) => {
             format!("{header}\n{}", format_collapsible_block(body, 3800))
@@ -34,17 +41,20 @@ pub fn format_tool_call(name: &str, details: Option<&str>) -> String {
 }
 
 /// Format a tool call result/update.
-pub fn format_tool_result(name: &str, output: Option<&str>, details: Option<&str>) -> String {
+pub fn format_tool_result(
+    name: &str,
+    kind: acp::ToolKind,
+    status: acp::ToolCallStatus,
+    output: Option<&str>,
+    details: Option<&str>,
+) -> String {
+    let header = format_tool_header(name, kind, status);
     match details.or(output) {
         Some(body) => {
             let section = format_collapsible_block(body, 3900);
-            format!(
-                "✅ *Tool:* `{}`\n{}",
-                escape_markdown_v2_code(name),
-                section
-            )
+            format!("{header}\n{section}")
         }
-        None => format!("✅ *Tool:* `{}`", escape_markdown_v2_code(name)),
+        None => header,
     }
 }
 
@@ -125,6 +135,34 @@ fn escape_markdown_v2_code(text: &str) -> String {
         }
     }
     out
+}
+
+fn format_tool_header(name: &str, kind: acp::ToolKind, status: acp::ToolCallStatus) -> String {
+    let (status_icon, status_label) = match status {
+        acp::ToolCallStatus::Pending => ("⏳", "pending"),
+        acp::ToolCallStatus::InProgress => ("🔄", "in_progress"),
+        acp::ToolCallStatus::Completed => ("✅", "completed"),
+        acp::ToolCallStatus::Failed => ("❌", "failed"),
+        _ => ("⏳", "pending"),
+    };
+    let (kind_icon, kind_label) = match kind {
+        acp::ToolKind::Read => ("📖", "read"),
+        acp::ToolKind::Edit => ("✏️", "edit"),
+        acp::ToolKind::Delete => ("🗑️", "delete"),
+        acp::ToolKind::Move => ("📦", "move"),
+        acp::ToolKind::Search => ("🔍", "search"),
+        acp::ToolKind::Execute => ("▶️", "execute"),
+        acp::ToolKind::Think => ("🧠", "think"),
+        acp::ToolKind::Fetch => ("🌐", "fetch"),
+        acp::ToolKind::Other => ("🛠️", "other"),
+        _ => ("🛠️", "other"),
+    };
+    format!(
+        "{status_icon} {kind_icon} *Tool:* `{}`\n*Type:* `{}`\n*Status:* `{}`",
+        escape_markdown_v2_code(name),
+        escape_markdown_v2_code(kind_label),
+        escape_markdown_v2_code(status_label)
+    )
 }
 
 fn escape_markdown_v2_url(text: &str) -> String {
