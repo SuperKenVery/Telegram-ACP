@@ -1,5 +1,7 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use std::collections::HashMap;
+use std::path::PathBuf;
 use teloxide::prelude::*;
 use teloxide::types::{MessageId, ParseMode, ThreadId};
 
@@ -16,19 +18,26 @@ impl Command for NewCommand {
     }
 
     fn description(&self) -> &'static str {
-        "Create a new session topic (optional agent)"
+        "Create new session: /new [agent] [project_path]"
     }
 
     async fn execute(&self, ctx: CommandContext<'_>) -> Result<()> {
-        let project_path = ctx
-            .daemon
-            .get_session_project_path_by_thread(ctx.thread_id)
-            .ok_or_else(|| anyhow!("No active session in this topic"))?;
-        let agent = parse_agent_arg(ctx.args)?;
+        let parsed = parse_new_args(ctx.args, &ctx.daemon.config.agents)?;
+        let project_path = if let Some(path) = parsed.project_path {
+            PathBuf::from(path)
+        } else {
+            ctx.daemon
+                .get_session_project_path_by_thread(ctx.thread_id)
+                .ok_or_else(|| anyhow!("No active session in this topic; provide a path: /new [agent] <project_path>"))?
+        };
 
         match ctx
             .daemon
-            .spawn_session(project_path.to_string_lossy().to_string(), None, agent)
+            .spawn_session(
+                project_path.to_string_lossy().to_string(),
+                None,
+                parsed.agent,
+            )
             .await
         {
             Ok((acp_session_id, _thread_id)) => {
@@ -54,17 +63,40 @@ impl Command for NewCommand {
     }
 }
 
-fn parse_agent_arg(args: &str) -> Result<Option<String>> {
+struct NewArgs {
+    agent: Option<String>,
+    project_path: Option<String>,
+}
+
+fn parse_new_args(args: &str, configured_agents: &HashMap<String, String>) -> Result<NewArgs> {
     let trimmed = args.trim();
     if trimmed.is_empty() {
-        return Ok(None);
+        return Ok(NewArgs {
+            agent: None,
+            project_path: None,
+        });
     }
 
-    let mut parts = trimmed.split_whitespace();
-    let agent = parts.next().unwrap_or_default();
-    if parts.next().is_some() {
-        anyhow::bail!("Usage: /new [agent]");
+    let mut parts = trimmed.splitn(2, char::is_whitespace);
+    let first = parts.next().unwrap_or_default().trim();
+    let second = parts.next().map(str::trim).filter(|s| !s.is_empty());
+
+    if configured_agents.contains_key(first) {
+        return Ok(NewArgs {
+            agent: Some(first.to_string()),
+            project_path: second.map(ToOwned::to_owned),
+        });
     }
 
-    Ok(Some(agent.to_string()))
+    if second.is_some() {
+        anyhow::bail!(
+            "Unknown agent '{}'. Usage: /new [agent] [project_path], or /new <project_path>",
+            first
+        );
+    }
+
+    Ok(NewArgs {
+        agent: None,
+        project_path: Some(trimmed.to_string()),
+    })
 }
