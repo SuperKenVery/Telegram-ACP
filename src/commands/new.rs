@@ -15,6 +15,10 @@ impl Command for NewCommand {
         "new"
     }
 
+    fn description(&self) -> &'static str {
+        "Create a new session topic (optional agent)"
+    }
+
     async fn execute(&self, ctx: CommandContext<'_>) -> Result<()> {
         let project_path = ctx
             .daemon

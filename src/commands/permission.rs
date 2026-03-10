@@ -21,6 +21,10 @@ impl Command for PermissionCommand {
         "permission"
     }
 
+    fn description(&self) -> &'static str {
+        "Choose the permission mode"
+    }
+
     async fn execute(&self, ctx: CommandContext<'_>) -> Result<()> {
         let state = get_control_state(ctx.daemon, ctx.thread_id).await?;
         if state.permission_modes.is_empty() {

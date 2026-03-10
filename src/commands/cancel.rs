@@ -19,6 +19,10 @@ impl Command for CancelCommand {
         "cancel"
     }
 
+    fn description(&self) -> &'static str {
+        "Cancel the current running prompt"
+    }
+
     async fn execute(&self, ctx: CommandContext<'_>) -> Result<()> {
         cancel_prompt(ctx.daemon, ctx.thread_id).await?;
         ctx.bot

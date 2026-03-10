@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use teloxide::prelude::*;
-use teloxide::types::{CallbackQuery, Message};
+use teloxide::types::{BotCommand, CallbackQuery, Message};
 use tokio::sync::oneshot;
 
 use crate::daemon::DaemonHandle;
@@ -32,6 +32,7 @@ pub struct CommandContext<'a> {
 #[async_trait]
 pub trait Command: Send + Sync {
     fn name(&self) -> &'static str;
+    fn description(&self) -> &'static str;
     async fn execute(&self, ctx: CommandContext<'_>) -> Result<()>;
 }
 
@@ -43,6 +44,13 @@ fn command_registry() -> Vec<Box<dyn Command>> {
         Box::new(PermissionCommand),
         Box::new(RenameCommand),
     ]
+}
+
+pub fn telegram_menu_commands() -> Vec<BotCommand> {
+    command_registry()
+        .into_iter()
+        .map(|command| BotCommand::new(command.name(), command.description()))
+        .collect()
 }
 
 fn parse_command(text: &str) -> Option<(String, String)> {

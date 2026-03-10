@@ -21,6 +21,10 @@ impl Command for ModelCommand {
         "model"
     }
 
+    fn description(&self) -> &'static str {
+        "Choose the model for this session"
+    }
+
     async fn execute(&self, ctx: CommandContext<'_>) -> Result<()> {
         let state = get_control_state(ctx.daemon, ctx.thread_id).await?;
         let selector = match state.model_selector {

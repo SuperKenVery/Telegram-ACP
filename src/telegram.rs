@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use teloxide::prelude::*;
 use teloxide::types::{
-    CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, MessageId, ParseMode, ThreadId,
+    BotCommandScope, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, MessageId,
+    ParseMode, Recipient, ThreadId,
 };
 use tokio::sync::mpsc;
 
@@ -61,6 +62,10 @@ pub async fn run_bot(bot: Bot, daemon: Arc<DaemonHandle>) {
     use teloxide::dptree;
     use teloxide::types::Update;
 
+    if let Err(e) = register_bot_commands(&bot, daemon.config.chat_id).await {
+        tracing::warn!("Failed to register Telegram slash commands: {e}");
+    }
+
     let handler = dptree::entry()
         .branch(Update::filter_message().endpoint(handle_message))
         .branch(Update::filter_callback_query().endpoint(handle_callback_query));
@@ -71,6 +76,15 @@ pub async fn run_bot(bot: Bot, daemon: Arc<DaemonHandle>) {
         .build()
         .dispatch()
         .await;
+}
+
+async fn register_bot_commands(bot: &Bot, chat_id: i64) -> anyhow::Result<()> {
+    bot.set_my_commands(commands::telegram_menu_commands())
+        .scope(BotCommandScope::Chat {
+            chat_id: Recipient::Id(ChatId(chat_id)),
+        })
+        .await?;
+    Ok(())
 }
 
 /// Handle an incoming Telegram message.

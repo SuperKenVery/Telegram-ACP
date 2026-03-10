@@ -13,6 +13,10 @@ impl Command for RenameCommand {
         "rename"
     }
 
+    fn description(&self) -> &'static str {
+        "Rename this topic"
+    }
+
     async fn execute(&self, ctx: CommandContext<'_>) -> Result<()> {
         let new_name = ctx.args.trim();
         if new_name.is_empty() {
