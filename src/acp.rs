@@ -118,22 +118,28 @@ pub fn spawn_agent(
     let stdout = child.stdout.take().unwrap().compat();
     let stderr = child.stderr.take().unwrap();
 
+    let stderr_tail = spawn_stderr_drain(stderr);
+
+    let client = TelegramClient::new(event_tx, is_loading);
+
+    let (conn, handle_io) = acp::ClientSideConnection::new(client, stdin, stdout, |fut| {
+        tokio::task::spawn_local(fut);
+    });
+
+    Ok((conn, child, stderr_tail, handle_io))
+}
+
+fn spawn_stderr_drain(stderr: tokio::process::ChildStderr) -> SharedStderrTail {
     let stderr_tail: SharedStderrTail = Arc::new(Mutex::new(VecDeque::new()));
-    let stderr_tail_for_task = stderr_tail.clone();
+    let stderr_tail_for_task = Arc::clone(&stderr_tail);
+
     tokio::task::spawn_local(async move {
         let mut lines = BufReader::new(stderr).lines();
         loop {
             match lines.next_line().await {
                 Ok(Some(line)) => {
                     eprintln!("{line}");
-                    let mut tail = match stderr_tail_for_task.lock() {
-                        Ok(guard) => guard,
-                        Err(poisoned) => poisoned.into_inner(),
-                    };
-                    if tail.len() >= STDERR_TAIL_MAX_LINES {
-                        tail.pop_front();
-                    }
-                    tail.push_back(line);
+                    push_stderr_line(&stderr_tail_for_task, line);
                 }
                 Ok(None) => break,
                 Err(err) => {
@@ -144,13 +150,30 @@ pub fn spawn_agent(
         }
     });
 
-    let client = TelegramClient::new(event_tx, is_loading);
+    stderr_tail
+}
 
-    let (conn, handle_io) = acp::ClientSideConnection::new(client, stdin, stdout, |fut| {
-        tokio::task::spawn_local(fut);
-    });
+fn push_stderr_line(stderr_tail: &SharedStderrTail, line: String) {
+    let mut tail = match stderr_tail.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if tail.len() >= STDERR_TAIL_MAX_LINES {
+        tail.pop_front();
+    }
+    tail.push_back(line);
+}
 
-    Ok((conn, child, stderr_tail, handle_io))
+pub fn format_stderr_tail(stderr_tail: &SharedStderrTail) -> String {
+    let lines: Vec<String> = match stderr_tail.lock() {
+        Ok(guard) => guard.iter().cloned().collect(),
+        Err(poisoned) => poisoned.into_inner().iter().cloned().collect(),
+    };
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("\nAgent stderr (last {} lines):\n{}", lines.len(), lines.join("\n"))
+    }
 }
 
 /// Initialize an ACP connection: call initialize + new_session, return session_id.

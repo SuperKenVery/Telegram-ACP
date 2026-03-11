@@ -421,7 +421,7 @@ async fn init_agent(
         let session = acp::resume_session(&conn, project_path, old_id.clone())
             .await
             .map_err(|e| {
-                let stderr_tail = format_stderr_tail(&stderr_tail);
+                let stderr_tail = acp::format_stderr_tail(&stderr_tail);
                 anyhow::anyhow!(
                     "ACP resume_session failed (cmd: {}, project: {}, previous_session: {}): {:#}{}",
                     agent_cmd,
@@ -435,7 +435,7 @@ async fn init_agent(
         session
     } else {
         acp::init_session(&conn, project_path).await.map_err(|e| {
-            let stderr_tail = format_stderr_tail(&stderr_tail);
+            let stderr_tail = acp::format_stderr_tail(&stderr_tail);
             anyhow::anyhow!(
                 "ACP init_session failed (cmd: {}, project: {}): {:#}{}",
                 agent_cmd,
@@ -447,18 +447,6 @@ async fn init_agent(
     };
 
     Ok((conn, child, bootstrap))
-}
-
-fn format_stderr_tail(stderr_tail: &acp::SharedStderrTail) -> String {
-    let lines: Vec<String> = match stderr_tail.lock() {
-        Ok(guard) => guard.iter().cloned().collect(),
-        Err(poisoned) => poisoned.into_inner().iter().cloned().collect(),
-    };
-    if lines.is_empty() {
-        String::new()
-    } else {
-        format!("\nAgent stderr (last {} lines):\n{}", lines.len(), lines.join("\n"))
-    }
 }
 
 /// Run the daemon: start bot + IPC listener.
