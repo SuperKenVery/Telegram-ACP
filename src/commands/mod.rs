@@ -17,6 +17,7 @@ mod new;
 mod permission;
 mod remove;
 mod rename;
+mod timer;
 
 use cancel::CancelCommand;
 use command::CommandCommand;
@@ -26,6 +27,7 @@ use new::NewCommand;
 use permission::PermissionCommand;
 use remove::RemoveCommand;
 use rename::RenameCommand;
+use timer::TimerCommand;
 
 pub struct CommandContext<'a> {
     pub bot: &'a Bot,
@@ -52,6 +54,7 @@ fn command_registry() -> Vec<Box<dyn Command>> {
         Box::new(RemoveCommand),
         Box::new(CommandsCommand),
         Box::new(CommandCommand),
+        Box::new(TimerCommand),
     ]
 }
 
@@ -255,6 +258,7 @@ mod tests {
         assert!(has_registered_command("commands"));
         assert!(has_registered_command("command"));
         assert!(has_registered_command("new"));
+        assert!(has_registered_command("timer"));
         assert!(!has_registered_command("missing"));
     }
 }
