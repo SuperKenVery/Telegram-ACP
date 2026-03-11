@@ -13,6 +13,7 @@ mod telegraph;
 mod types;
 
 use clap::{Parser, Subcommand};
+use std::env;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -60,10 +61,13 @@ async fn main() -> anyhow::Result<()> {
             local.run_until(daemon::run_daemon(config)).await?;
         }
         Commands::New {
-            path,
+            mut path,
             prompt,
             agent,
         } => {
+            if path.is_relative() {
+                path = env::current_dir()?.join(path);
+            }
             let config = config::Config::load()?;
             let cmd = types::DaemonCommand::NewSession {
                 path,

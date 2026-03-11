@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::env;
 use std::path::PathBuf;
 use teloxide::prelude::*;
 use teloxide::types::{MessageId, ParseMode, ThreadId};
@@ -23,12 +24,14 @@ impl Command for NewCommand {
 
     async fn execute(&self, ctx: CommandContext<'_>) -> Result<()> {
         let parsed = parse_new_args(ctx.args, &ctx.daemon.config.agents)?;
-        let project_path = if let Some(path) = parsed.project_path {
-            PathBuf::from(path)
+        let project_path = if let Some(raw_path) = parsed.project_path {
+            absolutize_project_path(PathBuf::from(raw_path))?
         } else {
-            ctx.daemon
+            let existing_path = ctx
+                .daemon
                 .get_session_project_path_by_thread(ctx.thread_id)
-                .ok_or_else(|| anyhow!("No active session in this topic; provide a path: /new [agent] <project_path>"))?
+                .ok_or_else(|| anyhow!("No active session in this topic; provide a path: /new [agent] <project_path>"))?;
+            absolutize_project_path(existing_path)?
         };
 
         match ctx
@@ -60,6 +63,14 @@ impl Command for NewCommand {
         }
 
         Ok(())
+    }
+}
+
+fn absolutize_project_path(path: PathBuf) -> Result<PathBuf> {
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(env::current_dir()?.join(path))
     }
 }
 
