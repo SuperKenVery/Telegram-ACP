@@ -182,7 +182,7 @@ impl DaemonHandle {
                     .send_message(
                         ChatId(self.config.chat_id),
                         format!(
-                            "Failed to initialize ACP session for '{}' (topic {}). Topic was removed. Error: {}",
+                            "Failed to initialize ACP session for '{}' (topic {}). Topic was removed. Error:\n{:#}",
                             path, thread_id, e
                         ),
                     )
@@ -376,11 +376,12 @@ async fn spawn_and_run_agent(
         }
         Err(e) => {
             tracing::error!(
-                "Failed to initialize ACP agent (cmd: {}, project: {}): {e}",
+                "Failed to initialize ACP agent (cmd: {}, project: {}): {:#}",
                 agent_cmd,
-                project_path.display()
+                project_path.display(),
+                e
             );
-            let _ = result_tx.send(Err(anyhow::anyhow!("{e}")));
+            let _ = result_tx.send(Err(e));
         }
     }
 }
@@ -399,8 +400,15 @@ async fn init_agent(
     let is_loading = Arc::new(AtomicBool::new(existing_acp_session_id.is_some()));
     let io_event_tx = event_tx.clone();
 
-    let (conn, child, handle_io) =
-        acp::spawn_agent(agent_cmd, project_path, event_tx, is_loading.clone())?;
+    let (conn, child, stderr_tail, handle_io) =
+        acp::spawn_agent(agent_cmd, project_path, event_tx, is_loading.clone()).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to spawn ACP agent process (cmd: {}, project: {}): {:#}",
+                agent_cmd,
+                project_path.display(),
+                e
+            )
+        })?;
 
     tokio::task::spawn_local(async move {
         if let Err(e) = handle_io.await {
@@ -410,14 +418,47 @@ async fn init_agent(
     });
 
     let bootstrap = if let Some(old_id) = existing_acp_session_id.clone() {
-        let session = acp::resume_session(&conn, project_path, old_id).await?;
+        let session = acp::resume_session(&conn, project_path, old_id.clone())
+            .await
+            .map_err(|e| {
+                let stderr_tail = format_stderr_tail(&stderr_tail);
+                anyhow::anyhow!(
+                    "ACP resume_session failed (cmd: {}, project: {}, previous_session: {}): {:#}{}",
+                    agent_cmd,
+                    project_path.display(),
+                    old_id,
+                    e,
+                    stderr_tail
+                )
+            })?;
         is_loading.store(false, Ordering::Relaxed);
         session
     } else {
-        acp::init_session(&conn, project_path).await?
+        acp::init_session(&conn, project_path).await.map_err(|e| {
+            let stderr_tail = format_stderr_tail(&stderr_tail);
+            anyhow::anyhow!(
+                "ACP init_session failed (cmd: {}, project: {}): {:#}{}",
+                agent_cmd,
+                project_path.display(),
+                e,
+                stderr_tail
+            )
+        })?
     };
 
     Ok((conn, child, bootstrap))
+}
+
+fn format_stderr_tail(stderr_tail: &acp::SharedStderrTail) -> String {
+    let lines: Vec<String> = match stderr_tail.lock() {
+        Ok(guard) => guard.iter().cloned().collect(),
+        Err(poisoned) => poisoned.into_inner().iter().cloned().collect(),
+    };
+    if lines.is_empty() {
+        String::new()
+    } else {
+        format!("\nAgent stderr (last {} lines):\n{}", lines.len(), lines.join("\n"))
+    }
 }
 
 /// Run the daemon: start bot + IPC listener.

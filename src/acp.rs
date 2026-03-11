@@ -1,14 +1,20 @@
 use acp::Agent;
 use agent_client_protocol as acp;
 use anyhow::Result;
+use std::collections::VecDeque;
 use std::path::Path;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::types::AgentEvent;
+
+pub type SharedStderrTail = Arc<Mutex<VecDeque<String>>>;
+const STDERR_TAIL_MAX_LINES: usize = 50;
 
 pub struct SessionBootstrap {
     pub session_id: acp::SessionId,
@@ -93,6 +99,7 @@ pub fn spawn_agent(
 ) -> Result<(
     acp::ClientSideConnection,
     tokio::process::Child,
+    SharedStderrTail,
     impl std::future::Future<Output = acp::Result<()>>,
 )> {
     // Execute via shell so user-configured commands support shell expansion
@@ -103,12 +110,39 @@ pub fn spawn_agent(
         .current_dir(project_path)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()?;
 
     let stdin = child.stdin.take().unwrap().compat_write();
     let stdout = child.stdout.take().unwrap().compat();
+    let stderr = child.stderr.take().unwrap();
+
+    let stderr_tail: SharedStderrTail = Arc::new(Mutex::new(VecDeque::new()));
+    let stderr_tail_for_task = stderr_tail.clone();
+    tokio::task::spawn_local(async move {
+        let mut lines = BufReader::new(stderr).lines();
+        loop {
+            match lines.next_line().await {
+                Ok(Some(line)) => {
+                    eprintln!("{line}");
+                    let mut tail = match stderr_tail_for_task.lock() {
+                        Ok(guard) => guard,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    if tail.len() >= STDERR_TAIL_MAX_LINES {
+                        tail.pop_front();
+                    }
+                    tail.push_back(line);
+                }
+                Ok(None) => break,
+                Err(err) => {
+                    eprintln!("Failed reading agent stderr: {err}");
+                    break;
+                }
+            }
+        }
+    });
 
     let client = TelegramClient::new(event_tx, is_loading);
 
@@ -116,7 +150,7 @@ pub fn spawn_agent(
         tokio::task::spawn_local(fut);
     });
 
-    Ok((conn, child, handle_io))
+    Ok((conn, child, stderr_tail, handle_io))
 }
 
 /// Initialize an ACP connection: call initialize + new_session, return session_id.
