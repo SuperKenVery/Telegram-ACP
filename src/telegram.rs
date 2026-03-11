@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use teloxide::prelude::*;
-use teloxide::types::{BotCommandScope, CallbackQuery, Recipient};
+use teloxide::types::{BotCommandScope, CallbackQuery, MessageKind, Recipient};
 
 use crate::commands;
 use crate::daemon::DaemonHandle;
@@ -50,7 +50,8 @@ async fn handle_message(bot: Bot, msg: Message, daemon: Arc<DaemonHandle>) -> an
 
     if let Some(thread_id) = msg.thread_id {
         if let Some(text) = msg.text() {
-            handle_topic_message(text, thread_id, &daemon).await?;
+            let prompt = build_prompt_with_quote(&msg, text);
+            handle_topic_message(&prompt, thread_id, &daemon).await?;
         }
     }
 
@@ -81,4 +82,40 @@ async fn handle_callback_query(
     daemon: Arc<DaemonHandle>,
 ) -> anyhow::Result<()> {
     commands::handle_callback_query(bot, query, daemon).await
+}
+
+fn build_prompt_with_quote(msg: &Message, raw_text: &str) -> String {
+    let Some(quote_text) = extract_quote_text(msg) else {
+        return raw_text.to_string();
+    };
+
+    format!("{}\n\n{}", format_blockquote(&quote_text), raw_text)
+}
+
+fn extract_quote_text(msg: &Message) -> Option<String> {
+    let MessageKind::Common(common) = &msg.kind else {
+        return None;
+    };
+
+    if let Some(quote) = &common.quote {
+        if !quote.text.trim().is_empty() {
+            return Some(quote.text.clone());
+        }
+    }
+
+    let reply = common.reply_to_message.as_deref()?;
+    let text = reply.text().or_else(|| reply.caption())?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn format_blockquote(text: &str) -> String {
+    text.lines()
+        .map(|line| format!("> {line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
