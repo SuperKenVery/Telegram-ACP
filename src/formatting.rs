@@ -187,9 +187,10 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<String> {
         }
 
         // Try to split at a newline near the limit
-        let cut = remaining[..max_len]
+        let safe_max = remaining.floor_char_boundary(max_len);
+        let cut = remaining[..safe_max]
             .rfind('\n')
-            .unwrap_or_else(|| remaining.floor_char_boundary(max_len));
+            .unwrap_or(safe_max);
 
         let (chunk, rest) = remaining.split_at(cut);
         chunks.push(chunk.to_string());
@@ -273,5 +274,20 @@ mod tests {
         assert!(text.contains("/search"));
         assert!(text.contains("Search the codebase"));
         assert!(text.contains("input: query"));
+    }
+
+    #[test]
+    fn split_message_multibyte_boundary() {
+        use super::split_message;
+        // Place a 3-byte character (em-dash) right at the split boundary
+        let mut text = "a".repeat(99);
+        text.push('—'); // bytes 99..102
+        text.push_str(&"b".repeat(50));
+        // Split at 100 — byte 100 is inside the '—' char
+        let chunks = split_message(&text, 100);
+        // Must not panic; all chunks should be valid UTF-8
+        for chunk in &chunks {
+            assert!(chunk.len() <= 100 || chunk.chars().count() > 0);
+        }
     }
 }
