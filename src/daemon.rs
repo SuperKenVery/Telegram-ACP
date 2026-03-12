@@ -6,12 +6,16 @@ use agent_client_protocol as acp_sdk;
 use anyhow::Result;
 use dashmap::DashMap;
 use futures::future::join_all;
+use rmcp::service::RxJsonRpcMessage;
+use rmcp::RoleServer;
+use serde_json::Value as JsonValue;
 use telegraph_rs::Telegraph;
 use teloxide::prelude::*;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::acp;
 use crate::config::Config;
+use crate::mcp;
 use crate::persistence;
 use crate::session;
 use crate::session_control::SessionCommand;
@@ -32,6 +36,8 @@ pub struct DaemonHandle {
 
 pub struct SessionEntry {
     pub acp_session_id: String,
+    pub mcp_session_id: String,
+    pub mcp: Arc<mcp::McpSession>,
     pub project_path: PathBuf,
     pub agent_command: String,
     pub status: Arc<tokio::sync::Mutex<SessionStatus>>,
@@ -49,6 +55,45 @@ struct StartSessionRequest {
 }
 
 impl DaemonHandle {
+    fn get_mcp_session_by_id(&self, session_id: &str) -> Option<Arc<mcp::McpSession>> {
+        self.sessions.iter().find_map(|entry| {
+            if entry.mcp_session_id == session_id {
+                Some(entry.mcp.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    pub async fn handle_mcp_message(
+        &self,
+        session_id: &str,
+        payload: &str,
+    ) -> Result<Option<String>> {
+        let mcp_session = self
+            .get_mcp_session_by_id(session_id)
+            .ok_or_else(|| anyhow::anyhow!("Unknown MCP session id: {}", session_id))?;
+
+        let payload_value: JsonValue = serde_json::from_str(payload)
+            .map_err(|e| anyhow::anyhow!("Invalid MCP payload: {e}"))?;
+        let expects_response = mcp_expects_response(&payload_value);
+        let message: RxJsonRpcMessage<RoleServer> = serde_json::from_value(payload_value)
+            .map_err(|e| anyhow::anyhow!("Failed to decode MCP payload: {e}"))?;
+
+        mcp_session.send(message).await?;
+
+        if expects_response {
+            if let Some(response) = mcp_session.next_response().await {
+                let payload = serde_json::to_string(&response)?;
+                Ok(Some(payload))
+            } else {
+                Ok(None)
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
     pub async fn cancel_session(&self, thread_id: i32) -> Result<()> {
         let entry = self
             .sessions
@@ -263,6 +308,9 @@ impl DaemonHandle {
         let available_commands = Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
         let status = Arc::new(tokio::sync::Mutex::new(SessionStatus::Initializing));
+        let mcp_session = Arc::new(mcp::McpSession::new().await?);
+        let mcp_session_id = mcp_session.id.clone();
+        let mcp_servers = build_mcp_servers(&mcp_session_id, &self.config.socket_path)?;
 
         // Spawn the event consumer within LocalSet.
         let bot = self.bot.clone();
@@ -290,6 +338,7 @@ impl DaemonHandle {
             ChatId(self.config.chat_id),
             thread_id,
             existing_acp_session_id,
+            mcp_servers,
             result_tx,
         ));
 
@@ -301,6 +350,8 @@ impl DaemonHandle {
             thread_id,
             SessionEntry {
                 acp_session_id: acp_session_id.clone(),
+                mcp_session_id,
+                mcp: mcp_session,
                 project_path,
                 agent_command: agent_cmd,
                 status,
@@ -330,6 +381,7 @@ async fn spawn_and_run_agent(
     chat_id: ChatId,
     thread_id: i32,
     existing_acp_session_id: Option<String>,
+    mcp_servers: Vec<acp_sdk::McpServer>,
     result_tx: oneshot::Sender<Result<String>>,
 ) {
     match init_agent(
@@ -337,6 +389,7 @@ async fn spawn_and_run_agent(
         &project_path,
         event_tx.clone(),
         &existing_acp_session_id,
+        mcp_servers,
     )
     .await
     {
@@ -392,6 +445,7 @@ async fn init_agent(
     project_path: &PathBuf,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
     existing_acp_session_id: &Option<String>,
+    mcp_servers: Vec<acp_sdk::McpServer>,
 ) -> Result<(
     agent_client_protocol::ClientSideConnection,
     tokio::process::Child,
@@ -418,7 +472,7 @@ async fn init_agent(
     });
 
     let bootstrap = if let Some(old_id) = existing_acp_session_id.clone() {
-        let session = acp::resume_session(&conn, project_path, old_id.clone())
+        let session = acp::resume_session(&conn, project_path, old_id.clone(), mcp_servers)
             .await
             .map_err(|e| {
                 let stderr_tail = acp::format_stderr_tail(&stderr_tail);
@@ -434,19 +488,56 @@ async fn init_agent(
         is_loading.store(false, Ordering::Relaxed);
         session
     } else {
-        acp::init_session(&conn, project_path).await.map_err(|e| {
-            let stderr_tail = acp::format_stderr_tail(&stderr_tail);
-            anyhow::anyhow!(
-                "ACP init_session failed (cmd: {}, project: {}): {:#}{}",
-                agent_cmd,
-                project_path.display(),
-                e,
-                stderr_tail
-            )
-        })?
+        acp::init_session(&conn, project_path, mcp_servers)
+            .await
+            .map_err(|e| {
+                let stderr_tail = acp::format_stderr_tail(&stderr_tail);
+                anyhow::anyhow!(
+                    "ACP init_session failed (cmd: {}, project: {}): {:#}{}",
+                    agent_cmd,
+                    project_path.display(),
+                    e,
+                    stderr_tail
+                )
+            })?
     };
 
     Ok((conn, child, bootstrap))
+}
+
+fn build_mcp_servers(
+    mcp_session_id: &str,
+    socket_path: &PathBuf,
+) -> Result<Vec<acp_sdk::McpServer>> {
+    let exe_path = std::env::current_exe()
+        .map_err(|e| anyhow::anyhow!("Failed to resolve current executable: {e}"))?;
+    let args = vec![
+        "mcp-relay".to_string(),
+        "--session".to_string(),
+        mcp_session_id.to_string(),
+        "--socket".to_string(),
+        socket_path.to_string_lossy().to_string(),
+    ];
+    let server = acp_sdk::McpServer::Stdio(
+        acp_sdk::McpServerStdio::new("telegram-acp-relay", exe_path).args(args),
+    );
+    Ok(vec![server])
+}
+
+fn mcp_expects_response(value: &JsonValue) -> bool {
+    match value {
+        JsonValue::Object(map) => map
+            .get("id")
+            .map(|id| !id.is_null())
+            .unwrap_or(false),
+        JsonValue::Array(items) => items.iter().any(|item| {
+            item.as_object()
+                .and_then(|map| map.get("id"))
+                .map(|id| !id.is_null())
+                .unwrap_or(false)
+        }),
+        _ => false,
+    }
 }
 
 /// Run the daemon: start bot + IPC listener.
@@ -536,6 +627,14 @@ pub async fn run_daemon(config: Config) -> Result<()> {
                             message: e.to_string(),
                         },
                     },
+                    DaemonCommand::McpMessage { session_id, payload } => {
+                        match daemon.handle_mcp_message(&session_id, &payload).await {
+                            Ok(payload) => DaemonResponse::McpResponse { payload },
+                            Err(e) => DaemonResponse::Error {
+                                message: e.to_string(),
+                            },
+                        }
+                    }
                     DaemonCommand::ListSessions => DaemonResponse::SessionList {
                         sessions: daemon.list_sessions().await,
                     },

@@ -180,6 +180,7 @@ pub fn format_stderr_tail(stderr_tail: &SharedStderrTail) -> String {
 pub async fn init_session(
     conn: &acp::ClientSideConnection,
     project_path: &Path,
+    mcp_servers: Vec<acp::McpServer>,
 ) -> Result<SessionBootstrap> {
     conn.initialize(
         acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_info(
@@ -190,7 +191,7 @@ pub async fn init_session(
     .await?;
 
     let session_resp = conn
-        .new_session(acp::NewSessionRequest::new(project_path))
+        .new_session(acp::NewSessionRequest::new(project_path).mcp_servers(mcp_servers))
         .await?;
 
     Ok(SessionBootstrap {
@@ -205,6 +206,7 @@ pub async fn resume_session(
     conn: &acp::ClientSideConnection,
     project_path: &Path,
     old_acp_session_id: String,
+    mcp_servers: Vec<acp::McpServer>,
 ) -> Result<SessionBootstrap> {
     let init_resp = conn
         .initialize(
@@ -225,7 +227,8 @@ pub async fn resume_session(
             .load_session(acp::LoadSessionRequest::new(
                 old_acp_session_id,
                 project_path,
-            ))
+            )
+            .mcp_servers(mcp_servers.clone()))
             .await
         {
             Ok(load_resp) => {
@@ -242,7 +245,7 @@ pub async fn resume_session(
                     session_id
                 );
                 let session_resp = conn
-                    .new_session(acp::NewSessionRequest::new(project_path))
+                    .new_session(acp::NewSessionRequest::new(project_path).mcp_servers(mcp_servers))
                     .await?;
                 Ok(SessionBootstrap {
                     session_id: session_resp.session_id,
@@ -254,7 +257,7 @@ pub async fn resume_session(
     } else {
         tracing::info!("Agent does not support load_session, creating new session");
         let session_resp = conn
-            .new_session(acp::NewSessionRequest::new(project_path))
+            .new_session(acp::NewSessionRequest::new(project_path).mcp_servers(mcp_servers))
             .await?;
         Ok(SessionBootstrap {
             session_id: session_resp.session_id,

@@ -12,6 +12,10 @@ pub enum DaemonCommand {
         prompt: Option<String>,
         agent: Option<String>,
     },
+    McpMessage {
+        session_id: String,
+        payload: String,
+    },
     ListSessions,
 }
 
@@ -21,6 +25,9 @@ pub enum DaemonResponse {
     SessionCreated {
         acp_session_id: String,
         topic_url: String,
+    },
+    McpResponse {
+        payload: Option<String>,
     },
     SessionList {
         sessions: Vec<SessionInfo>,

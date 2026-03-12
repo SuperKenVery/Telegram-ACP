@@ -4,6 +4,8 @@ mod config;
 mod daemon;
 mod formatting;
 mod ipc;
+mod mcp;
+mod mcp_relay;
 mod persistence;
 mod session;
 mod session_control;
@@ -40,6 +42,15 @@ enum Commands {
     },
     /// List active sessions
     Status,
+    /// Run MCP relay over stdio and forward to the daemon
+    McpRelay {
+        /// MCP session id to route messages to
+        #[arg(long)]
+        session: String,
+        /// Unix socket path for the daemon IPC
+        #[arg(short, long)]
+        socket: Option<PathBuf>,
+    },
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -122,6 +133,13 @@ async fn main() -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
             }
+        }
+        Commands::McpRelay { session, socket } => {
+            let socket_path = match socket {
+                Some(socket_path) => socket_path,
+                None => config::Config::load()?.socket_path,
+            };
+            mcp_relay::run(session, socket_path).await?;
         }
     }
 
