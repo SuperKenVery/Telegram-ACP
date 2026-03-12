@@ -11,6 +11,10 @@ use acp::Client; // needed to call session_notification on AgentSideConnection
 use agent_client_protocol as acp;
 use std::cell::OnceCell;
 use std::rc::Rc;
+use std::time::Duration;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::Command;
+use tokio::task::JoinHandle;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 struct MockAgent {
@@ -37,8 +41,22 @@ impl acp::Agent for MockAgent {
 
     async fn new_session(
         &self,
-        _args: acp::NewSessionRequest,
+        args: acp::NewSessionRequest,
     ) -> acp::Result<acp::NewSessionResponse> {
+        // Probe any advertised MCP servers to verify tool discovery (e.g. upload_markdown).
+        let mcp_servers = args.mcp_servers.clone();
+        if mcp_servers.is_empty() {
+            eprintln!("mock-agent: no MCP servers advertised in new_session");
+        } else {
+            for server in mcp_servers {
+                tokio::task::spawn_local(async move {
+                    if let Err(err) = mcp_probe(server).await {
+                        eprintln!("mock-agent: MCP probe error: {err}");
+                    }
+                });
+            }
+        }
+
         Ok(acp::NewSessionResponse::new(acp::SessionId::new(
             "mock-session-1",
         )))
@@ -164,6 +182,122 @@ async fn send_text(conn: &acp::AgentSideConnection, sid: &acp::SessionId, text: 
     ))
     .await
     .ok();
+}
+
+async fn mcp_probe(server: acp::McpServer) -> anyhow::Result<()> {
+    match server {
+        acp::McpServer::Stdio(stdio) => {
+            eprintln!("mock-agent: probing MCP stdio server: {:?}", stdio);
+
+            let mut cmd = Command::new(stdio.command);
+            cmd.args(stdio.args);
+            cmd.stdin(std::process::Stdio::piped());
+            cmd.stdout(std::process::Stdio::piped());
+            cmd.stderr(std::process::Stdio::piped());
+
+            let mut child = cmd.spawn()?;
+            let mut stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("missing stdin"))?;
+            let stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("missing stdout"))?;
+            let stderr = child.stderr.take().ok_or_else(|| anyhow::anyhow!("missing stderr"))?;
+
+            let stderr_handle: JoinHandle<()> = tokio::task::spawn_local(async move {
+                let mut reader = BufReader::new(stderr);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    let bytes = reader.read_line(&mut line).await.unwrap_or(0);
+                    if bytes == 0 {
+                        break;
+                    }
+                    eprintln!("mcp-relay stderr: {}", line.trim_end());
+                }
+            });
+
+            // Send initialize request, then wait for its response before sending initialized.
+            let init = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-03-26",
+                    "clientInfo": { "name": "mock-agent", "version": "0.1.0" },
+                    "capabilities": {}
+                }
+            });
+            write_json_line(&mut stdin, &init).await?;
+
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            let mut got_init = false;
+            let mut got_tools = false;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+
+            while tokio::time::Instant::now() < deadline && !(got_init && got_tools) {
+                line.clear();
+                match tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut line)).await
+                {
+                    Ok(Ok(0)) => break,
+                    Ok(Ok(_)) => {
+                        let trimmed = line.trim_end();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        eprintln!("mcp-relay stdout: {trimmed}");
+
+                        if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                            let id = value.get("id").and_then(|v| v.as_i64());
+                            if id == Some(1) && !got_init {
+                                got_init = true;
+                                let initialized = serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "method": "notifications/initialized",
+                                    "params": {}
+                                });
+                                write_json_line(&mut stdin, &initialized).await?;
+
+                                let list_tools = serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "id": 2,
+                                    "method": "tools/list",
+                                    "params": {}
+                                });
+                                write_json_line(&mut stdin, &list_tools).await?;
+                            } else if id == Some(2) {
+                                got_tools = true;
+                            }
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        eprintln!("mock-agent: MCP read error: {e}");
+                        break;
+                    }
+                    Err(_) => {
+                        eprintln!("mock-agent: MCP read timeout");
+                        break;
+                    }
+                }
+            }
+
+            let _ = child.kill();
+            let _ = stderr_handle.await;
+        }
+        other => {
+            eprintln!("mock-agent: MCP server type not supported for probe: {:?}", other);
+        }
+    }
+
+    Ok(())
+}
+
+async fn write_json_line(
+    stdin: &mut tokio::process::ChildStdin,
+    value: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let mut buf = serde_json::to_vec(value)?;
+    buf.push(b'\n');
+    stdin.write_all(&buf).await?;
+    stdin.flush().await?;
+    Ok(())
 }
 
 #[tokio::main]
