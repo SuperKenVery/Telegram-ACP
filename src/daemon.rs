@@ -27,7 +27,7 @@ pub struct DaemonHandle {
     pub config: Config,
     pub bot: Bot,
     #[allow(dead_code)]
-    pub telegraph: Telegraph,
+    pub telegraph: Arc<Telegraph>,
     /// Relay for starting ACP sessions inside the daemon's LocalSet task.
     local_start_tx: mpsc::UnboundedSender<StartSessionRequest>,
     /// thread_id -> SessionEntry
@@ -308,7 +308,16 @@ impl DaemonHandle {
         let available_commands = Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
         let status = Arc::new(tokio::sync::Mutex::new(SessionStatus::Initializing));
-        let mcp_session = Arc::new(mcp::McpSession::new().await?);
+        let mcp_session = Arc::new(
+            mcp::McpSession::new(
+                self.bot.clone(),
+                self.telegraph.clone(),
+                ChatId(self.config.chat_id),
+                thread_id,
+                project_path.clone(),
+            )
+            .await?,
+        );
         let mcp_session_id = mcp_session.id.clone();
         let mcp_servers = build_mcp_servers(&mcp_session_id, &self.config.socket_path)?;
 
@@ -545,7 +554,9 @@ pub async fn run_daemon(config: Config) -> Result<()> {
     tracing::info!("Starting telegram-acp daemon");
 
     let bot = Bot::new(&config.bot_token);
-    let telegraph = crate::telegraph::create_account(config.telegraph_author.as_deref()).await?;
+    let telegraph = Arc::new(
+        crate::telegraph::create_account(config.telegraph_author.as_deref()).await?,
+    );
     let (local_start_tx, mut local_start_rx) = mpsc::unbounded_channel::<StartSessionRequest>();
 
     let daemon = Arc::new(DaemonHandle {

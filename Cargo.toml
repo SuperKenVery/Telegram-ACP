@@ -17,10 +17,12 @@ agent-client-protocol = { version = "0.10", features = ["unstable_session_usage"
 reqwest = { version = "0.12", features = ["json", "socks"] }
 anyhow = "1"
 async-trait = "0.1"
+base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 dashmap = "6"
 futures = "0.3"
 rmcp = { version = "1.2", features = ["server"] }
+pulldown-cmark = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 similar = "2"

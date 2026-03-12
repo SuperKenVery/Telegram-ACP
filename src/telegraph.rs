@@ -1,5 +1,6 @@
 use anyhow::Result;
 use telegraph_rs::{html_to_node, Telegraph};
+use pulldown_cmark::{html, Options, Parser};
 
 /// Create a Telegraph page with file changes from an agent session.
 pub async fn create_diff_post(
@@ -18,6 +19,32 @@ pub async fn create_diff_post(
     }
 
     let content = html_to_node(&html);
+
+    let page = telegraph
+        .create_page(title, &content, false)
+        .await
+        .map_err(|e| anyhow::anyhow!("Telegraph API error: {e}"))?;
+
+    Ok(page.url)
+}
+
+/// Create a Telegraph page from Markdown content.
+pub async fn create_markdown_post(
+    telegraph: &Telegraph,
+    title: &str,
+    markdown: &str,
+) -> Result<String> {
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_FOOTNOTES);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    options.insert(Options::ENABLE_TASKLISTS);
+
+    let parser = Parser::new_ext(markdown, options);
+    let mut html_output = String::new();
+    html::push_html(&mut html_output, parser);
+
+    let content = html_to_node(&html_output);
 
     let page = telegraph
         .create_page(title, &content, false)
