@@ -321,12 +321,50 @@ async fn send_message_draft(
 
 fn fix_md_for_telegram(text: &str) -> String {
     match telegram_markdown_v2::convert(text) {
-        Ok(converted) => converted.trim_end_matches('\n').to_string(),
+        Ok(converted) => {
+            let trimmed = converted.trim_end_matches('\n');
+            escape_gt_outside_code(trimmed)
+        }
         Err(e) => {
             tracing::warn!("telegram_markdown_v2 conversion failed, using escaped fallback: {e}");
             formatting::escape_markdown_v2(text)
         }
     }
+}
+
+fn escape_gt_outside_code(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_code_block = false;
+
+    for line in text.split_inclusive('\n') {
+        let line_trim = line.trim_start();
+        if line_trim.starts_with("```") {
+            in_code_block = !in_code_block;
+            out.push_str(line);
+            continue;
+        }
+
+        if in_code_block {
+            out.push_str(line);
+            continue;
+        }
+
+        let mut chars = line.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '>' {
+                if out.ends_with('\\') {
+                    out.push(ch);
+                } else {
+                    out.push('\\');
+                    out.push(ch);
+                }
+            } else {
+                out.push(ch);
+            }
+        }
+    }
+
+    out
 }
 
 /// Flush the accumulated draft text as a finalized `sendMessage`.
