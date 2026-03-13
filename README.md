@@ -1,12 +1,18 @@
-# telegram-acp
+# Telegram-ACP
 
 **Control any coding agent through Telegram.**
+
+| Screenshots | Screenshots | Screenshots |
+|---|---|---|
+| ![photo_1_2026-03-14_01-08-15](https://github.com/user-attachments/assets/e84143a7-58ac-4927-991f-b9cbb772aae2) | ![photo_2_2026-03-14_01-08-15](https://github.com/user-attachments/assets/18346bb9-39a9-4199-b206-e3fe7135e42b) | ![photo_2026-03-14_01-13-09](https://github.com/user-attachments/assets/53ac0332-0ca7-4683-bb36-f0d49e84f0a0) |
+| **Talking with agent.** <br/> Handle multiple sessions with tabs and threads. | **Uploading artifacts.** <br/>Use telegraph to view your markdown files, or let it upload images or files. | **Slash commands.** <br/>Manage your sessions with ease, set models and permissions, or use agent's commands. |
 
 ## What you get
 
 - Get notifications and view real-time progress on your phone
 - Give new tasks to agent even you're away from computer
 - Works with any agent that supports [ACP](https://agentclientprotocol.com/). This is almost any agent, including claude code, codex, opencode and cursor.
+- Handle multiple sessions simutaniously, in different telegram tabs
 
 # Instalation
 
