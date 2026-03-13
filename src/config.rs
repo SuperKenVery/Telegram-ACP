@@ -94,15 +94,23 @@ impl Config {
     }
 
     pub fn resolve_agent_command(&self, selected_agent: Option<&str>) -> Result<String> {
+        self.resolve_agent(selected_agent)
+            .map(|(_, command)| command)
+    }
+
+    pub fn resolve_agent(&self, selected_agent: Option<&str>) -> Result<(String, String)> {
         let selected_agent = selected_agent
             .map(str::trim)
             .filter(|v| !v.is_empty())
             .unwrap_or(&self.default_agent);
 
-        self.agents
+        let command = self
+            .agents
             .get(selected_agent)
             .cloned()
-            .ok_or_else(|| anyhow::anyhow!(unknown_agent_message(selected_agent, &self.agents)))
+            .ok_or_else(|| anyhow::anyhow!(unknown_agent_message(selected_agent, &self.agents)))?;
+
+        Ok((selected_agent.to_string(), command))
     }
 }
 

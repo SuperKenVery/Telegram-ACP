@@ -52,19 +52,34 @@ impl Command for SwitchCommand {
             .map(|s| s.acp_session_id.as_str());
 
         let mut rows = Vec::new();
+        let mut line_text = String::from("History:\n");
+        let mut current_row = Vec::new();
         for (i, record) in history.iter().enumerate() {
             let is_active = Some(record.acp_session_id.as_str()) == active_id;
+            let agent_label = record
+                .agent_name
+                .as_deref()
+                .unwrap_or(record.agent_command.as_str());
             let label = format!(
                 "{}{} | {} | {}",
                 if is_active { "* " } else { "" },
-                record.agent_command,
+                agent_label,
                 record.project_path.display(),
                 record.created_at.format("%Y-%m-%d %H:%M"),
             );
+            line_text.push_str(&format!("{}. {}\n", i + 1, label));
+
             let data = format!("{CB_PREFIX}:{thread_id}:{i}");
             if data.len() <= 64 {
-                rows.push(vec![InlineKeyboardButton::callback(label, data)]);
+                current_row.push(InlineKeyboardButton::callback(format!("{}", i + 1), data));
+                if current_row.len() == 5 {
+                    rows.push(current_row);
+                    current_row = Vec::new();
+                }
             }
+        }
+        if !current_row.is_empty() {
+            rows.push(current_row);
         }
 
         if rows.is_empty() {
@@ -78,9 +93,13 @@ impl Command for SwitchCommand {
             return Ok(());
         }
 
+        if line_text.len() > 3900 {
+            line_text.truncate(3890);
+            line_text.push_str("\n...");
+        }
         let keyboard = InlineKeyboardMarkup::new(rows);
         ctx.bot
-            .send_message(ctx.msg.chat.id, "Select session:")
+            .send_message(ctx.msg.chat.id, line_text)
             .message_thread_id(ThreadId(MessageId(thread_id)))
             .reply_markup(keyboard)
             .await?;

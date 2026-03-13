@@ -1,10 +1,22 @@
 use agent_client_protocol as acp;
+use telegram_markdown_v2::UnsupportedTagsStrategy;
 
 /// MarkdownV2 formatting utilities for Telegram messages.
 
+/// Convert regular Markdown into Telegram MarkdownV2 using Escape strategy for unsupported tags.
+pub fn markdown_to_telegram_md_v2(markdown: &str) -> String {
+    match telegram_markdown_v2::convert_with_strategy(markdown, UnsupportedTagsStrategy::Escape) {
+        Ok(converted) => converted.trim_end_matches('\n').to_string(),
+        Err(e) => {
+            tracing::warn!("telegram_markdown_v2 conversion failed, using escaped fallback: {e}");
+            escape_markdown_v2(markdown)
+        }
+    }
+}
+
 /// Escape text for Telegram MarkdownV2 parse mode.
 pub fn escape_markdown_v2(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
+    let mut out = String::with_capacity(text.len()*2);
     for ch in text.chars() {
         match ch {
             '_' | '*' | '[' | ']' | '(' | ')' | '~' | '`' | '>' | '#' | '+' | '-' | '=' | '|'
@@ -20,7 +32,7 @@ pub fn escape_markdown_v2(text: &str) -> String {
 
 /// Format an agent text message for Telegram. Truncates to fit within Telegram's 4096 char limit.
 pub fn format_text_message(text: &str) -> String {
-    // Keep model text untouched so valid MarkdownV2 from the agent can render.
+    // Keep model text as Markdown and convert once at send boundary.
     truncate_message(text, 4096)
 }
 
@@ -70,19 +82,16 @@ pub fn format_tool_result(
 
 /// Format a completion message.
 pub fn format_completion(stop_reason: &str, telegraph_url: Option<&str>) -> String {
-    let mut msg = format!("✓ *Done* \\({}\\)", escape_markdown_v2(stop_reason));
+    let mut msg = format!("✓ **Done** ({stop_reason})");
     if let Some(url) = telegraph_url {
-        msg.push_str(&format!(
-            "\n\n📄 [View changes]({})",
-            escape_markdown_v2_url(url)
-        ));
+        msg.push_str(&format!("\n\n📄 [View changes]({url})"));
     }
     msg
 }
 
 /// Format an error message.
 pub fn format_error(error: &str) -> String {
-    format!("❌ *Error:* {}", escape_markdown_v2(error))
+    format!("❌ **Error:** {error}")
 }
 
 pub fn format_plan(plan: &acp::Plan) -> String {
@@ -101,11 +110,11 @@ pub fn format_plan(plan: &acp::Plan) -> String {
         .unwrap_or("Plan");
 
     let mut lines = Vec::with_capacity(entries.len() + 2);
-    lines.push(escape_markdown_v2(title));
+    lines.push(title.to_string());
     lines.push(String::new());
 
     for (idx, entry) in entries.iter().enumerate() {
-        let content = escape_markdown_v2(&entry.content);
+        let content = &entry.content;
         let line = match entry.status {
             acp::PlanEntryStatus::Completed => format!("{}. ✅ {}", idx + 1, content),
             _ => format!("{}. {}", idx + 1, content),
@@ -121,18 +130,14 @@ pub fn format_plan_completed(plan: &acp::Plan) -> String {
     lines.push("✅ Plan completed".to_string());
     lines.push(String::new());
     for (idx, entry) in plan.entries.iter().enumerate() {
-        lines.push(format!(
-            "{}. ✅ {}",
-            idx + 1,
-            escape_markdown_v2(&entry.content)
-        ));
+        lines.push(format!("{}. ✅ {}", idx + 1, entry.content));
     }
     truncate_message(&lines.join("\n"), 4096)
 }
 
 pub fn format_available_commands(commands: &[acp::AvailableCommand]) -> String {
     if commands.is_empty() {
-        return escape_markdown_v2("No agent slash commands are advertised for this session.");
+        return "No agent slash commands are advertised for this session.".to_string();
     }
 
     let mut lines = Vec::with_capacity(commands.len() * 2 + 2);
@@ -147,8 +152,7 @@ pub fn format_available_commands(commands: &[acp::AvailableCommand]) -> String {
         lines.push(line);
     }
 
-    let full_text = lines.join("\n");
-    truncate_message(&escape_markdown_v2(&full_text), 4096)
+    truncate_message(&lines.join("\n"), 4096)
 }
 
 /// Truncate a message to fit within a maximum length.
@@ -166,8 +170,7 @@ fn truncate_message(text: &str, max_len: usize) -> String {
 }
 
 fn format_collapsible_block(text: &str, max_len: usize) -> String {
-    let escaped = escape_markdown_v2_code(text);
-    let truncated = truncate_message(&escaped, max_len);
+    let truncated = truncate_message(text, max_len);
     format!("```\n{}\n```", truncated)
 }
 
@@ -188,9 +191,7 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<String> {
 
         // Try to split at a newline near the limit
         let safe_max = remaining.floor_char_boundary(max_len);
-        let cut = remaining[..safe_max]
-            .rfind('\n')
-            .unwrap_or(safe_max);
+        let cut = remaining[..safe_max].rfind('\n').unwrap_or(safe_max);
 
         let (chunk, rest) = remaining.split_at(cut);
         chunks.push(chunk.to_string());
@@ -198,20 +199,6 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<String> {
     }
 
     chunks
-}
-
-fn escape_markdown_v2_code(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for ch in text.chars() {
-        match ch {
-            '`' | '\\' => {
-                out.push('\\');
-                out.push(ch);
-            }
-            _ => out.push(ch),
-        }
-    }
-    out
 }
 
 fn format_tool_header(name: &str, kind: acp::ToolKind, status: acp::ToolCallStatus) -> String {
@@ -234,29 +221,12 @@ fn format_tool_header(name: &str, kind: acp::ToolKind, status: acp::ToolCallStat
         acp::ToolKind::Other => "🛠️",
         _ => "🛠️",
     };
-    format!(
-        "{status_icon} {kind_icon} *Tool:* `{}`",
-        escape_markdown_v2_code(name)
-    )
-}
-
-fn escape_markdown_v2_url(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for ch in text.chars() {
-        match ch {
-            ')' | '\\' => {
-                out.push('\\');
-                out.push(ch);
-            }
-            _ => out.push(ch),
-        }
-    }
-    out
+    format!("{status_icon} {kind_icon} **Tool:** {name}")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::format_available_commands;
+    use super::{format_available_commands, markdown_to_telegram_md_v2};
     use agent_client_protocol as acp;
 
     #[test]
@@ -289,5 +259,13 @@ mod tests {
         for chunk in &chunks {
             assert!(chunk.len() <= 100 || chunk.chars().count() > 0);
         }
+    }
+
+    #[test]
+    fn markdown_to_telegram_md_v2_escapes_unsupported_quote_and_pipe() {
+        let input = "> a|b";
+        let out = markdown_to_telegram_md_v2(input);
+        assert!(out.starts_with("\\> "));
+        assert!(out.contains("\\|"));
     }
 }

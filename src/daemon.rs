@@ -58,6 +58,7 @@ struct StartSessionRequest {
     thread_id: i32,
     project_path: PathBuf,
     agent_cmd: String,
+    agent_name: Option<String>,
     existing_acp_session_id: Option<String>,
     result_tx: oneshot::Sender<Result<String>>,
 }
@@ -193,7 +194,7 @@ impl DaemonHandle {
         agent: Option<String>,
     ) -> Result<(String, i32)> {
         let project_path = PathBuf::from(&path);
-        let agent_cmd = self.config.resolve_agent_command(agent.as_deref())?;
+        let (agent_name, agent_cmd) = self.config.resolve_agent(agent.as_deref())?;
 
         // Create forum topic
         let topic_name = project_path
@@ -207,7 +208,7 @@ impl DaemonHandle {
         let thread_id = topic.thread_id.0 .0;
 
         let acp_session_id = match self
-            .enqueue_start_session(thread_id, project_path, agent_cmd, None)
+            .enqueue_start_session(thread_id, project_path, agent_cmd, Some(agent_name), None)
             .await
         {
             Ok(session_id) => session_id,
@@ -250,14 +251,14 @@ impl DaemonHandle {
         project_path: PathBuf,
         agent: Option<String>,
     ) -> Result<String> {
-        let agent_cmd = self.config.resolve_agent_command(agent.as_deref())?;
+        let (agent_name, agent_cmd) = self.config.resolve_agent(agent.as_deref())?;
 
         // Deactivate current session (drop it)
         if let Some(mut entry) = self.topics.get_mut(&thread_id) {
             entry.active = None;
         }
 
-        self.enqueue_start_session(thread_id, project_path, agent_cmd, None)
+        self.enqueue_start_session(thread_id, project_path, agent_cmd, Some(agent_name), None)
             .await
     }
 
@@ -276,6 +277,7 @@ impl DaemonHandle {
             thread_id,
             record.project_path.clone(),
             record.agent_command.clone(),
+            record.agent_name.clone(),
             Some(record.acp_session_id.clone()),
         )
         .await
@@ -292,6 +294,7 @@ impl DaemonHandle {
                 thread_id,
                 record.project_path.clone(),
                 record.agent_command.clone(),
+                record.agent_name.clone(),
                 Some(record.acp_session_id.clone()),
             )
             .await?;
@@ -320,6 +323,7 @@ impl DaemonHandle {
         thread_id: i32,
         project_path: PathBuf,
         agent_cmd: String,
+        agent_name: Option<String>,
         existing_acp_session_id: Option<String>,
     ) -> Result<String> {
         let (result_tx, result_rx) = oneshot::channel();
@@ -328,6 +332,7 @@ impl DaemonHandle {
                 thread_id,
                 project_path,
                 agent_cmd,
+                agent_name,
                 existing_acp_session_id,
                 result_tx,
             })
@@ -345,6 +350,7 @@ impl DaemonHandle {
         thread_id: i32,
         project_path: PathBuf,
         agent_cmd: String,
+        agent_name: Option<String>,
         existing_acp_session_id: Option<String>,
     ) -> Result<String> {
         // Channels
@@ -419,6 +425,7 @@ impl DaemonHandle {
             acp_session_id: acp_session_id.clone(),
             project_path,
             agent_command: agent_cmd,
+            agent_name: agent_name.clone(),
             created_at: now,
             last_updated_at: now,
         };
@@ -436,6 +443,9 @@ impl DaemonHandle {
             .find(|r| r.acp_session_id == record.acp_session_id);
         if let Some(existing) = existing {
             existing.last_updated_at = now;
+            if existing.agent_name.is_none() {
+                existing.agent_name = agent_name;
+            }
         } else {
             topic.history.push(record);
         }
@@ -648,6 +658,7 @@ pub async fn run_daemon(config: Config) -> Result<()> {
                         req.thread_id,
                         req.project_path,
                         req.agent_cmd,
+                        req.agent_name,
                         req.existing_acp_session_id,
                     )
                     .await;

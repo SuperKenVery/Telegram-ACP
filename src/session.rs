@@ -298,11 +298,12 @@ async fn send_message_draft(
     let client = bot.client();
     let token = bot.token();
     let url = format!("https://api.telegram.org/bot{token}/sendMessageDraft");
+    let telegram_text = formatting::markdown_to_telegram_md_v2(text);
 
     let mut body = serde_json::json!({
         "chat_id": chat_id.0,
         "draft_id": draft_id,
-        "text": text,
+        "text": telegram_text,
         "parse_mode": "MarkdownV2",
     });
 
@@ -317,54 +318,6 @@ async fn send_message_draft(
         anyhow::bail!("sendMessageDraft failed ({status}): {body_text}");
     }
     Ok(())
-}
-
-fn fix_md_for_telegram(text: &str) -> String {
-    match telegram_markdown_v2::convert(text) {
-        Ok(converted) => {
-            let trimmed = converted.trim_end_matches('\n');
-            escape_gt_outside_code(trimmed)
-        }
-        Err(e) => {
-            tracing::warn!("telegram_markdown_v2 conversion failed, using escaped fallback: {e}");
-            formatting::escape_markdown_v2(text)
-        }
-    }
-}
-
-fn escape_gt_outside_code(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut in_code_block = false;
-
-    for line in text.split_inclusive('\n') {
-        let line_trim = line.trim_start();
-        if line_trim.starts_with("```") {
-            in_code_block = !in_code_block;
-            out.push_str(line);
-            continue;
-        }
-
-        if in_code_block {
-            out.push_str(line);
-            continue;
-        }
-
-        let mut chars = line.chars().peekable();
-        while let Some(ch) = chars.next() {
-            if ch == '>' {
-                if out.ends_with('\\') {
-                    out.push(ch);
-                } else {
-                    out.push('\\');
-                    out.push(ch);
-                }
-            } else {
-                out.push(ch);
-            }
-        }
-    }
-
-    out
 }
 
 /// Flush the accumulated draft text as a finalized `sendMessage`.
@@ -385,7 +338,7 @@ async fn flush_draft(
             DraftKind::AgentMessage => formatting::format_text_message(&d.text),
             DraftKind::AgentThought => formatting::format_thought_message(&d.text),
         };
-        let finalized_text = fix_md_for_telegram(&formatted);
+        let finalized_text = formatting::markdown_to_telegram_md_v2(&formatted);
         let chunks = formatting::split_message(&finalized_text, 4096);
         for chunk in chunks {
             throttle.wait_turn().await;
@@ -403,24 +356,6 @@ async fn flush_draft(
                     chunk_len = chunk.len(),
                     "Failed to send finalized draft chunk as MarkdownV2: {e}"
                 );
-                let safe_text = formatting::escape_markdown_v2(&chunk);
-                let safe_chunks = formatting::split_message(&safe_text, 4096);
-                for safe_chunk in safe_chunks {
-                    throttle.wait_turn().await;
-                    if let Err(e) = bot
-                        .send_message(chat_id, safe_chunk)
-                        .message_thread_id(ThreadId(MessageId(thread_id)))
-                        .parse_mode(ParseMode::MarkdownV2)
-                        .disable_notification(disable_notification)
-                        .await
-                    {
-                        tracing::warn!(
-                            chat_id = chat_id.0,
-                            thread_id = thread_id,
-                            "Failed to send escaped finalized draft chunk fallback: {e}"
-                        );
-                    }
-                }
                 break;
             }
         }
@@ -448,7 +383,8 @@ async fn send_markdown_message(
     throttle: &mut OutboundThrottle,
 ) -> Option<Message> {
     throttle.wait_turn().await;
-    bot.send_message(chat_id, text)
+    let telegram_text = formatting::markdown_to_telegram_md_v2(text);
+    bot.send_message(chat_id, telegram_text)
         .message_thread_id(ThreadId(MessageId(thread_id)))
         .parse_mode(ParseMode::MarkdownV2)
         .disable_notification(disable_notification)
@@ -464,17 +400,16 @@ async fn send_markdown_chunks(
     disable_notification: bool,
     throttle: &mut OutboundThrottle,
 ) {
-    let chunks = formatting::split_message(text, 4096);
+    let telegram_text = formatting::markdown_to_telegram_md_v2(text);
+    let chunks = formatting::split_message(&telegram_text, 4096);
     for chunk in chunks {
-        let _ = send_markdown_message(
-            bot,
-            chat_id,
-            thread_id,
-            &chunk,
-            disable_notification,
-            throttle,
-        )
-        .await;
+        throttle.wait_turn().await;
+        let _ = bot
+            .send_message(chat_id, chunk)
+            .message_thread_id(ThreadId(MessageId(thread_id)))
+            .parse_mode(ParseMode::MarkdownV2)
+            .disable_notification(disable_notification)
+            .await;
     }
 }
 
@@ -535,14 +470,13 @@ pub async fn run_event_consumer(
                 });
                 d.text.push_str(&t);
 
-                let escaped_draft_text =
-                    fix_md_for_telegram(&formatting::format_text_message(&d.text));
+                let draft_text = formatting::format_text_message(&d.text);
                 if let Err(e) = send_message_draft(
                     &bot,
                     chat_id,
                     thread_id,
                     d.draft_id,
-                    &escaped_draft_text,
+                    &draft_text,
                     &mut throttle,
                 )
                 .await
@@ -589,14 +523,13 @@ pub async fn run_event_consumer(
                 });
                 d.text.push_str(&t);
 
-                let escaped_draft_text =
-                    fix_md_for_telegram(&formatting::format_thought_message(&d.text));
+                let draft_text = formatting::format_thought_message(&d.text);
                 if let Err(e) = send_message_draft(
                     &bot,
                     chat_id,
                     thread_id,
                     d.draft_id,
-                    &escaped_draft_text,
+                    &draft_text,
                     &mut throttle,
                 )
                 .await
@@ -639,7 +572,7 @@ pub async fn run_event_consumer(
                     &bot,
                     chat_id,
                     thread_id,
-                    "⏳ _Working on it\\.\\.\\._",
+                    "⏳ _Working on it..._",
                     disable_notification,
                     &mut throttle,
                 )
@@ -718,9 +651,10 @@ pub async fn run_event_consumer(
                 );
 
                 if let Some(state) = tool_call_messages.get_mut(&id) {
+                    let telegram_text = formatting::markdown_to_telegram_md_v2(&text);
                     throttle.wait_turn().await;
                     if bot
-                        .edit_message_text(chat_id, state.msg_id, text.clone())
+                        .edit_message_text(chat_id, state.msg_id, telegram_text)
                         .parse_mode(ParseMode::MarkdownV2)
                         .await
                         .is_ok()
@@ -799,9 +733,10 @@ pub async fn run_event_consumer(
 
                 let formatted = formatting::format_plan(&plan);
                 if let Some(existing_plan_message_id) = plan_message_id {
+                    let telegram_formatted = formatting::markdown_to_telegram_md_v2(&formatted);
                     throttle.wait_turn().await;
                     if bot
-                        .edit_message_text(chat_id, existing_plan_message_id, formatted.clone())
+                        .edit_message_text(chat_id, existing_plan_message_id, telegram_formatted)
                         .parse_mode(ParseMode::MarkdownV2)
                         .await
                         .is_ok()

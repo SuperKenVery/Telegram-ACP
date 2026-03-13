@@ -54,6 +54,7 @@ pub fn load_topics() -> Vec<PersistedTopic> {
                     acp_session_id: s.acp_session_id.clone(),
                     project_path: s.project_path,
                     agent_command: s.agent_command,
+                    agent_name: None,
                     created_at: now,
                     last_updated_at: now,
                 };

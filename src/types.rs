@@ -61,6 +61,8 @@ pub struct SessionRecord {
     pub acp_session_id: String,
     pub project_path: PathBuf,
     pub agent_command: String,
+    #[serde(default)]
+    pub agent_name: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_updated_at: DateTime<Utc>,
 }

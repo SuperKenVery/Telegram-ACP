@@ -44,12 +44,12 @@ impl Command for NewCommand {
                     .await
                 {
                     Ok(acp_session_id) => {
-                        let reply = format!(
-                            "Session `{}` started in this topic\\.",
-                            formatting::escape_markdown_v2(&acp_session_id)
-                        );
+                        let reply_markdown = format!("Session `{acp_session_id}` started in this topic.");
                         ctx.bot
-                            .send_message(ctx.msg.chat.id, reply)
+                            .send_message(
+                                ctx.msg.chat.id,
+                                formatting::markdown_to_telegram_md_v2(&reply_markdown),
+                            )
                             .message_thread_id(ThreadId(MessageId(thread_id)))
                             .parse_mode(ParseMode::MarkdownV2)
                             .await?;
@@ -82,12 +82,12 @@ impl Command for NewCommand {
                     .await
                 {
                     Ok((acp_session_id, _thread_id)) => {
-                        let reply = format!(
-                            "Session `{}` created in a new topic\\.",
-                            formatting::escape_markdown_v2(&acp_session_id)
-                        );
+                        let reply_markdown = format!("Session `{acp_session_id}` created in a new topic.");
                         ctx.bot
-                            .send_message(ctx.msg.chat.id, reply)
+                            .send_message(
+                                ctx.msg.chat.id,
+                                formatting::markdown_to_telegram_md_v2(&reply_markdown),
+                            )
                             .parse_mode(ParseMode::MarkdownV2)
                             .await?;
                     }
