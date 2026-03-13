@@ -20,10 +20,11 @@ impl Command for CommandCommand {
     }
 
     async fn execute(&self, ctx: CommandContext<'_>) -> Result<()> {
+        let thread_id = ctx.require_thread_id()?;
         let Some((command_name, args)) = parse_args(ctx.args) else {
             ctx.bot
                 .send_message(ctx.msg.chat.id, "Usage: /command <name> [args]")
-                .message_thread_id(ThreadId(MessageId(ctx.thread_id)))
+                .message_thread_id(ThreadId(MessageId(thread_id)))
                 .await?;
             return Ok(());
         };
@@ -36,7 +37,7 @@ impl Command for CommandCommand {
 
         let command_tx = ctx
             .daemon
-            .get_session_command_tx_by_thread(ctx.thread_id)
+            .get_session_command_tx_by_thread(thread_id)
             .context("No active session in this topic")?;
         command_tx
             .send(SessionCommand::Prompt(prompt))

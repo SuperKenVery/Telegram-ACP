@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use agent_client_protocol as acp_sdk;
 use anyhow::Result;
+use chrono::Utc;
 use dashmap::DashMap;
 use futures::future::join_all;
 use rmcp::service::RxJsonRpcMessage;
@@ -16,11 +17,11 @@ use tokio::sync::{mpsc, oneshot};
 use crate::acp;
 use crate::config::Config;
 use crate::mcp;
-use crate::persistence;
+use crate::persistence::{self, PersistedTopic};
 use crate::session;
 use crate::session_control::SessionCommand;
 use crate::telegram;
-use crate::types::{AgentEvent, SessionInfo, SessionStatus};
+use crate::types::{AgentEvent, SessionRecord, SessionStatus};
 
 /// Shared daemon state, accessible from Telegram handlers and IPC.
 pub struct DaemonHandle {
@@ -30,8 +31,15 @@ pub struct DaemonHandle {
     pub telegraph: Arc<Telegraph>,
     /// Relay for starting ACP sessions inside the daemon's LocalSet task.
     local_start_tx: mpsc::UnboundedSender<StartSessionRequest>,
-    /// thread_id -> SessionEntry
-    pub sessions: DashMap<i32, SessionEntry>,
+    /// thread_id -> TopicEntry
+    pub topics: DashMap<i32, TopicEntry>,
+}
+
+pub struct TopicEntry {
+    /// Currently running session, if any.
+    pub active: Option<SessionEntry>,
+    /// All sessions ever bound to this topic.
+    pub history: Vec<SessionRecord>,
 }
 
 pub struct SessionEntry {
@@ -56,12 +64,12 @@ struct StartSessionRequest {
 
 impl DaemonHandle {
     fn get_mcp_session_by_id(&self, session_id: &str) -> Option<Arc<mcp::McpSession>> {
-        self.sessions.iter().find_map(|entry| {
-            if entry.mcp_session_id == session_id {
-                Some(entry.mcp.clone())
-            } else {
-                None
-            }
+        self.topics.iter().find_map(|entry| {
+            entry
+                .active
+                .as_ref()
+                .filter(|s| s.mcp_session_id == session_id)
+                .map(|s| s.mcp.clone())
         })
     }
 
@@ -95,13 +103,19 @@ impl DaemonHandle {
     }
 
     pub async fn cancel_session(&self, thread_id: i32) -> Result<()> {
-        let entry = self
-            .sessions
-            .get(&thread_id)
-            .ok_or_else(|| anyhow::anyhow!("No active session in this topic"))?;
+        let cancel_tx = {
+            let entry = self
+                .topics
+                .get(&thread_id)
+                .ok_or_else(|| anyhow::anyhow!("No topic for this thread"))?;
+            let active = entry
+                .active
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("No active session in this topic"))?;
+            active.cancel_tx.clone()
+        };
         let (result_tx, result_rx) = oneshot::channel();
-        entry
-            .cancel_tx
+        cancel_tx
             .send(result_tx)
             .map_err(|_| anyhow::anyhow!("Session cancel channel closed"))?;
         result_rx
@@ -109,10 +123,10 @@ impl DaemonHandle {
             .map_err(|_| anyhow::anyhow!("Cancel request dropped"))?
     }
 
-    /// Remove a session from in-memory state and persisted storage.
-    pub async fn remove_session(&self, thread_id: i32) -> Option<SessionEntry> {
-        let (_, entry) = self.sessions.remove(&thread_id)?;
-        self.persist_sessions().await;
+    /// Remove a topic from in-memory state and persisted storage.
+    pub async fn remove_topic(&self, thread_id: i32) -> Option<TopicEntry> {
+        let (_, entry) = self.topics.remove(&thread_id)?;
+        self.persist_topics().await;
         Some(entry)
     }
 
@@ -120,13 +134,19 @@ impl DaemonHandle {
         &self,
         thread_id: i32,
     ) -> Option<mpsc::UnboundedSender<SessionCommand>> {
-        self.sessions.get(&thread_id).map(|e| e.command_tx.clone())
+        self.topics
+            .get(&thread_id)?
+            .active
+            .as_ref()
+            .map(|e| e.command_tx.clone())
     }
 
     pub fn get_session_project_path_by_thread(&self, thread_id: i32) -> Option<PathBuf> {
-        self.sessions
-            .get(&thread_id)
-            .map(|entry| entry.project_path.clone())
+        self.topics
+            .get(&thread_id)?
+            .active
+            .as_ref()
+            .map(|e| e.project_path.clone())
     }
 
     pub async fn get_available_commands_by_thread(
@@ -134,49 +154,33 @@ impl DaemonHandle {
         thread_id: i32,
     ) -> Option<Vec<acp_sdk::AvailableCommand>> {
         let available_commands = self
-            .sessions
-            .get(&thread_id)
-            .map(|entry| entry.available_commands.clone())?;
+            .topics
+            .get(&thread_id)?
+            .active
+            .as_ref()
+            .map(|e| e.available_commands.clone())?;
         let commands = available_commands.lock().await.clone();
         Some(commands)
     }
 
-    pub async fn list_sessions(&self) -> Vec<SessionInfo> {
-        let entries: Vec<_> = self
-            .sessions
-            .iter()
-            .map(|entry| {
-                let thread_id = *entry.key();
-                let e = entry.value();
-                (
-                    e.acp_session_id.clone(),
-                    e.project_path.clone(),
-                    e.agent_command.clone(),
-                    e.status.clone(),
-                    thread_id,
-                )
-            })
-            .collect();
-
-        let mut result = Vec::with_capacity(entries.len());
-        for (acp_session_id, project_path, agent_command, status, thread_id) in entries {
-            let status = *status.lock().await;
-            result.push(SessionInfo {
-                acp_session_id,
-                project_path,
-                status,
+    /// Persist current topics to disk.
+    pub async fn persist_topics(&self) {
+        let mut persisted = Vec::new();
+        for entry in self.topics.iter() {
+            let thread_id = *entry.key();
+            let topic = entry.value();
+            let active_session_id = topic
+                .active
+                .as_ref()
+                .map(|s| s.acp_session_id.clone());
+            persisted.push(PersistedTopic {
                 thread_id,
-                agent_command,
+                active_session_id,
+                sessions: topic.history.clone(),
             });
         }
-        result
-    }
-
-    /// Persist current sessions to disk.
-    pub async fn persist_sessions(&self) {
-        let sessions = self.list_sessions().await;
-        if let Err(e) = persistence::save_sessions(&sessions) {
-            tracing::error!("Failed to persist sessions: {e}");
+        if let Err(e) = persistence::save_topics(&persisted) {
+            tracing::error!("Failed to persist topics: {e}");
         }
     }
 
@@ -239,14 +243,56 @@ impl DaemonHandle {
         Ok((acp_session_id, thread_id))
     }
 
+    /// Replace the active session in an existing topic with a new one.
+    pub async fn replace_session_in_thread(
+        &self,
+        thread_id: i32,
+        project_path: PathBuf,
+        agent: Option<String>,
+    ) -> Result<String> {
+        let agent_cmd = self.config.resolve_agent_command(agent.as_deref())?;
+
+        // Deactivate current session (drop it)
+        if let Some(mut entry) = self.topics.get_mut(&thread_id) {
+            entry.active = None;
+        }
+
+        self.enqueue_start_session(thread_id, project_path, agent_cmd, None)
+            .await
+    }
+
+    /// Switch to a previously used session in a topic by resuming it.
+    pub async fn switch_to_session(
+        &self,
+        thread_id: i32,
+        record: &SessionRecord,
+    ) -> Result<String> {
+        // Deactivate current session (drop it)
+        if let Some(mut entry) = self.topics.get_mut(&thread_id) {
+            entry.active = None;
+        }
+
+        self.enqueue_start_session(
+            thread_id,
+            record.project_path.clone(),
+            record.agent_command.clone(),
+            Some(record.acp_session_id.clone()),
+        )
+        .await
+    }
+
     /// Restore a previously persisted session. Skips topic creation since the topic already exists.
-    pub async fn restore_session(&self, info: &SessionInfo) -> Result<()> {
+    async fn restore_session(
+        &self,
+        thread_id: i32,
+        record: &SessionRecord,
+    ) -> Result<()> {
         let acp_session_id = self
             .enqueue_start_session(
-                info.thread_id,
-                info.project_path.clone(),
-                info.agent_command.clone(),
-                Some(info.acp_session_id.clone()),
+                thread_id,
+                record.project_path.clone(),
+                record.agent_command.clone(),
+                Some(record.acp_session_id.clone()),
             )
             .await?;
 
@@ -255,14 +301,14 @@ impl DaemonHandle {
             .bot
             .reopen_forum_topic(
                 ChatId(self.config.chat_id),
-                teloxide::types::ThreadId(teloxide::types::MessageId(info.thread_id)),
+                teloxide::types::ThreadId(teloxide::types::MessageId(thread_id)),
             )
             .await;
 
         tracing::info!(
             "Restored session {} (thread {}, acp {})",
-            info.project_path.display(),
-            info.thread_id,
+            record.project_path.display(),
+            thread_id,
             acp_session_id
         );
         Ok(())
@@ -354,24 +400,49 @@ impl DaemonHandle {
         // Wait for ACP init to complete
         let acp_session_id = result_rx.await??;
 
-        // Store session
-        self.sessions.insert(
-            thread_id,
-            SessionEntry {
-                acp_session_id: acp_session_id.clone(),
-                mcp_session_id,
-                mcp: mcp_session,
-                project_path,
-                agent_command: agent_cmd,
-                status,
-                available_commands,
-                command_tx,
-                cancel_tx,
-            },
-        );
+        // Build SessionEntry
+        let session_entry = SessionEntry {
+            acp_session_id: acp_session_id.clone(),
+            mcp_session_id,
+            mcp: mcp_session,
+            project_path: project_path.clone(),
+            agent_command: agent_cmd.clone(),
+            status,
+            available_commands,
+            command_tx,
+            cancel_tx,
+        };
+
+        // Build history record
+        let now = Utc::now();
+        let record = SessionRecord {
+            acp_session_id: acp_session_id.clone(),
+            project_path,
+            agent_command: agent_cmd,
+            created_at: now,
+            last_updated_at: now,
+        };
+
+        // Get or create TopicEntry, set active, append to history
+        let mut topic = self.topics.entry(thread_id).or_insert_with(|| TopicEntry {
+            active: None,
+            history: Vec::new(),
+        });
+        topic.active = Some(session_entry);
+        // Check if this session already exists in history (resume case)
+        let existing = topic
+            .history
+            .iter_mut()
+            .find(|r| r.acp_session_id == record.acp_session_id);
+        if let Some(existing) = existing {
+            existing.last_updated_at = now;
+        } else {
+            topic.history.push(record);
+        }
+        drop(topic);
 
         // Persist after successful init
-        self.persist_sessions().await;
+        self.persist_topics().await;
 
         Ok(acp_session_id)
     }
@@ -564,7 +635,7 @@ pub async fn run_daemon(config: Config) -> Result<()> {
         bot: bot.clone(),
         telegraph,
         local_start_tx,
-        sessions: DashMap::new(),
+        topics: DashMap::new(),
     });
 
     let local_daemon = daemon.clone();
@@ -585,29 +656,47 @@ pub async fn run_daemon(config: Config) -> Result<()> {
         }
     });
 
-    // Restore persisted sessions
-    let persisted = persistence::load_sessions();
+    // Restore persisted topics
+    let persisted = persistence::load_topics();
     if !persisted.is_empty() {
-        tracing::info!("Restoring {} persisted session(s)", persisted.len());
-        let restore_results = join_all(persisted.into_iter().map(|info| {
+        tracing::info!("Restoring {} persisted topic(s)", persisted.len());
+
+        // Insert topic entries with history (active=None initially)
+        for pt in &persisted {
+            daemon.topics.insert(
+                pt.thread_id,
+                TopicEntry {
+                    active: None,
+                    history: pt.sessions.clone(),
+                },
+            );
+        }
+
+        // Restore active sessions
+        let restore_results = join_all(persisted.iter().filter_map(|pt| {
+            let active_id = pt.active_session_id.as_ref()?;
+            let record = pt.sessions.iter().find(|r| &r.acp_session_id == active_id)?;
             let daemon = daemon.clone();
-            async move {
-                let restore_result = daemon.restore_session(&info).await;
-                (info, restore_result)
-            }
+            let thread_id = pt.thread_id;
+            let record = record.clone();
+            Some(async move {
+                let restore_result = daemon.restore_session(thread_id, &record).await;
+                (thread_id, record, restore_result)
+            })
         }))
         .await;
-        for (info, restore_result) in restore_results {
+
+        for (thread_id, record, restore_result) in restore_results {
             if let Err(e) = restore_result {
                 tracing::error!(
                     "Failed to restore session for {} (thread {}): {e}",
-                    info.project_path.display(),
-                    info.thread_id
+                    record.project_path.display(),
+                    thread_id
                 );
             }
         }
         // Re-persist to update any sessions that got new ACP IDs from fallback
-        daemon.persist_sessions().await;
+        daemon.persist_topics().await;
     }
 
     // Spawn IPC server
@@ -646,9 +735,25 @@ pub async fn run_daemon(config: Config) -> Result<()> {
                             },
                         }
                     }
-                    DaemonCommand::ListSessions => DaemonResponse::SessionList {
-                        sessions: daemon.list_sessions().await,
-                    },
+                    DaemonCommand::ListSessions => {
+                        // Return a list of active sessions across all topics
+                        let mut sessions = Vec::new();
+                        for entry in daemon.topics.iter() {
+                            let thread_id = *entry.key();
+                            let topic = entry.value();
+                            if let Some(active) = &topic.active {
+                                let status = *active.status.lock().await;
+                                sessions.push(crate::types::SessionInfo {
+                                    acp_session_id: active.acp_session_id.clone(),
+                                    project_path: active.project_path.clone(),
+                                    agent_command: active.agent_command.clone(),
+                                    status,
+                                    thread_id,
+                                });
+                            }
+                        }
+                        DaemonResponse::SessionList { sessions }
+                    }
                 }
             })
         })

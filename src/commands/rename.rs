@@ -18,23 +18,24 @@ impl Command for RenameCommand {
     }
 
     async fn execute(&self, ctx: CommandContext<'_>) -> Result<()> {
+        let thread_id = ctx.require_thread_id()?;
         let new_name = ctx.args.trim();
         if new_name.is_empty() {
             ctx.bot
                 .send_message(ctx.msg.chat.id, "Usage: /rename <new topic name>")
-                .message_thread_id(ThreadId(MessageId(ctx.thread_id)))
+                .message_thread_id(ThreadId(MessageId(thread_id)))
                 .await?;
             return Ok(());
         }
 
         ctx.bot
-            .edit_forum_topic(ctx.msg.chat.id, ThreadId(MessageId(ctx.thread_id)))
+            .edit_forum_topic(ctx.msg.chat.id, ThreadId(MessageId(thread_id)))
             .name(new_name)
             .await?;
 
         ctx.bot
             .send_message(ctx.msg.chat.id, format!("Topic renamed to: {new_name}"))
-            .message_thread_id(ThreadId(MessageId(ctx.thread_id)))
+            .message_thread_id(ThreadId(MessageId(thread_id)))
             .await?;
 
         Ok(())

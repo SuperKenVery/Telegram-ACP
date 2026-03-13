@@ -26,7 +26,8 @@ impl Command for ModelCommand {
     }
 
     async fn execute(&self, ctx: CommandContext<'_>) -> Result<()> {
-        let state = get_control_state(ctx.daemon, ctx.thread_id).await?;
+        let thread_id = ctx.require_thread_id()?;
+        let state = get_control_state(ctx.daemon, thread_id).await?;
         let selector = match state.model_selector {
             Some(selector) => selector,
             None => {
@@ -35,7 +36,7 @@ impl Command for ModelCommand {
                         ctx.msg.chat.id,
                         "This agent session does not expose a model selector.",
                     )
-                    .message_thread_id(ThreadId(MessageId(ctx.thread_id)))
+                    .message_thread_id(ThreadId(MessageId(thread_id)))
                     .await?;
                 return Ok(());
             }
@@ -50,7 +51,7 @@ impl Command for ModelCommand {
                 option.name.clone()
             };
 
-            if let Some(data) = encode_callback(ctx.thread_id, &selector.config_id, &option.id) {
+            if let Some(data) = encode_callback(thread_id, &selector.config_id, &option.id) {
                 rows.push(vec![InlineKeyboardButton::callback(label, data)]);
             }
         }
@@ -61,7 +62,7 @@ impl Command for ModelCommand {
                     ctx.msg.chat.id,
                     "Model selector is available, but option identifiers are too long for Telegram callback payloads.",
                 )
-                .message_thread_id(ThreadId(MessageId(ctx.thread_id)))
+                .message_thread_id(ThreadId(MessageId(thread_id)))
                 .await?;
             return Ok(());
         }
@@ -69,7 +70,7 @@ impl Command for ModelCommand {
         let keyboard = InlineKeyboardMarkup::new(rows);
         ctx.bot
             .send_message(ctx.msg.chat.id, "Select model:")
-            .message_thread_id(ThreadId(MessageId(ctx.thread_id)))
+            .message_thread_id(ThreadId(MessageId(thread_id)))
             .reply_markup(keyboard)
             .await?;
 

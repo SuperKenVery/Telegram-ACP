@@ -19,46 +19,87 @@ impl Command for NewCommand {
     }
 
     fn description(&self) -> &'static str {
-        "Create new session: /new [agent] [project_path]"
+        "Create or replace session: /new [agent] [project_path]"
     }
 
     async fn execute(&self, ctx: CommandContext<'_>) -> Result<()> {
         let parsed = parse_new_args(ctx.args, &ctx.daemon.config.agents)?;
-        let project_path = if let Some(raw_path) = parsed.project_path {
-            absolutize_project_path(PathBuf::from(raw_path))?
-        } else {
-            let existing_path = ctx
-                .daemon
-                .get_session_project_path_by_thread(ctx.thread_id)
-                .ok_or_else(|| anyhow!("No active session in this topic; provide a path: /new [agent] <project_path>"))?;
-            absolutize_project_path(existing_path)?
-        };
 
-        match ctx
-            .daemon
-            .spawn_session(
-                project_path.to_string_lossy().to_string(),
-                None,
-                parsed.agent,
-            )
-            .await
-        {
-            Ok((acp_session_id, _thread_id)) => {
-                let reply = format!(
-                    "Session `{}` created in a new topic\\.",
-                    formatting::escape_markdown_v2(&acp_session_id)
-                );
-                ctx.bot
-                    .send_message(ctx.msg.chat.id, reply)
-                    .message_thread_id(ThreadId(MessageId(ctx.thread_id)))
-                    .parse_mode(ParseMode::MarkdownV2)
-                    .await?;
+        match ctx.thread_id {
+            Some(thread_id) => {
+                // In a topic: replace current session, reuse topic
+                let project_path = if let Some(raw_path) = parsed.project_path {
+                    absolutize_project_path(PathBuf::from(raw_path))?
+                } else {
+                    let existing_path = ctx
+                        .daemon
+                        .get_session_project_path_by_thread(thread_id)
+                        .ok_or_else(|| anyhow!("No active session in this topic; provide a path: /new [agent] <project_path>"))?;
+                    absolutize_project_path(existing_path)?
+                };
+
+                match ctx
+                    .daemon
+                    .replace_session_in_thread(thread_id, project_path, parsed.agent)
+                    .await
+                {
+                    Ok(acp_session_id) => {
+                        let reply = format!(
+                            "Session `{}` started in this topic\\.",
+                            formatting::escape_markdown_v2(&acp_session_id)
+                        );
+                        ctx.bot
+                            .send_message(ctx.msg.chat.id, reply)
+                            .message_thread_id(ThreadId(MessageId(thread_id)))
+                            .parse_mode(ParseMode::MarkdownV2)
+                            .await?;
+                    }
+                    Err(e) => {
+                        ctx.bot
+                            .send_message(
+                                ctx.msg.chat.id,
+                                format!("Failed to create session: {e}"),
+                            )
+                            .message_thread_id(ThreadId(MessageId(thread_id)))
+                            .await?;
+                    }
+                }
             }
-            Err(e) => {
-                ctx.bot
-                    .send_message(ctx.msg.chat.id, format!("Failed to create session: {e}"))
-                    .message_thread_id(ThreadId(MessageId(ctx.thread_id)))
-                    .await?;
+            None => {
+                // No topic: create new topic (requires explicit path)
+                let project_path = parsed
+                    .project_path
+                    .ok_or_else(|| anyhow!("Provide a project path: /new [agent] <project_path>"))?;
+                let project_path = absolutize_project_path(PathBuf::from(project_path))?;
+
+                match ctx
+                    .daemon
+                    .spawn_session(
+                        project_path.to_string_lossy().to_string(),
+                        None,
+                        parsed.agent,
+                    )
+                    .await
+                {
+                    Ok((acp_session_id, _thread_id)) => {
+                        let reply = format!(
+                            "Session `{}` created in a new topic\\.",
+                            formatting::escape_markdown_v2(&acp_session_id)
+                        );
+                        ctx.bot
+                            .send_message(ctx.msg.chat.id, reply)
+                            .parse_mode(ParseMode::MarkdownV2)
+                            .await?;
+                    }
+                    Err(e) => {
+                        ctx.bot
+                            .send_message(
+                                ctx.msg.chat.id,
+                                format!("Failed to create session: {e}"),
+                            )
+                            .await?;
+                    }
+                }
             }
         }
 

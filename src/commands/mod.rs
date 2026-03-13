@@ -17,6 +17,7 @@ mod new;
 mod permission;
 mod remove;
 mod rename;
+mod switch;
 mod timer;
 
 use cancel::CancelCommand;
@@ -27,14 +28,22 @@ use new::NewCommand;
 use permission::PermissionCommand;
 use remove::RemoveCommand;
 use rename::RenameCommand;
+use switch::SwitchCommand;
 use timer::TimerCommand;
 
 pub struct CommandContext<'a> {
     pub bot: &'a Bot,
     pub msg: &'a Message,
     pub daemon: &'a DaemonHandle,
-    pub thread_id: i32,
+    pub thread_id: Option<i32>,
     pub args: &'a str,
+}
+
+impl CommandContext<'_> {
+    pub fn require_thread_id(&self) -> Result<i32> {
+        self.thread_id
+            .ok_or_else(|| anyhow!("This command must be used inside a topic"))
+    }
 }
 
 #[async_trait]
@@ -55,6 +64,7 @@ fn command_registry() -> Vec<Box<dyn Command>> {
         Box::new(CommandsCommand),
         Box::new(CommandCommand),
         Box::new(TimerCommand),
+        Box::new(SwitchCommand),
     ]
 }
 
@@ -111,10 +121,7 @@ pub async fn execute_slash_command(
         None => return Ok(false),
     };
 
-    let thread_id = match msg.thread_id {
-        Some(id) => id.0 .0,
-        None => return Ok(false),
-    };
+    let thread_id = msg.thread_id.map(|id| id.0 .0);
 
     let command = command_registry()
         .into_iter()
@@ -164,6 +171,10 @@ pub async fn handle_callback_query(
     }
 
     if cancel::try_handle_callback(&bot, &query, &daemon).await? {
+        return Ok(());
+    }
+
+    if switch::try_handle_callback(&bot, &query, &daemon).await? {
         return Ok(());
     }
 
@@ -259,6 +270,7 @@ mod tests {
         assert!(has_registered_command("command"));
         assert!(has_registered_command("new"));
         assert!(has_registered_command("timer"));
+        assert!(has_registered_command("switch"));
         assert!(!has_registered_command("missing"));
     }
 }

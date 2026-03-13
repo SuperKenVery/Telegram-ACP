@@ -23,10 +23,11 @@ impl Command for TimerCommand {
     }
 
     async fn execute(&self, ctx: CommandContext<'_>) -> Result<()> {
+        let thread_id = ctx.require_thread_id()?;
         let args = parse_timer_args(ctx.args)?;
         let command_tx = ctx
             .daemon
-            .get_session_command_tx_by_thread(ctx.thread_id)
+            .get_session_command_tx_by_thread(thread_id)
             .ok_or_else(|| anyhow!("No active session in this topic"))?;
 
         let prompt = args.prompt.clone();
@@ -56,7 +57,7 @@ impl Command for TimerCommand {
 
         ctx.bot
             .send_message(ctx.msg.chat.id, summary)
-            .message_thread_id(ThreadId(MessageId(ctx.thread_id)))
+            .message_thread_id(ThreadId(MessageId(thread_id)))
             .await?;
 
         Ok(())

@@ -24,13 +24,14 @@ impl Command for CancelCommand {
     }
 
     async fn execute(&self, ctx: CommandContext<'_>) -> Result<()> {
-        cancel_prompt(ctx.daemon, ctx.thread_id).await?;
+        let thread_id = ctx.require_thread_id()?;
+        cancel_prompt(ctx.daemon, thread_id).await?;
         ctx.bot
             .send_message(
                 ctx.msg.chat.id,
                 "Interrupt requested. The current run is being cancelled.",
             )
-            .message_thread_id(ThreadId(MessageId(ctx.thread_id)))
+            .message_thread_id(ThreadId(MessageId(thread_id)))
             .await?;
         Ok(())
     }

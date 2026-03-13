@@ -1,7 +1,15 @@
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::types::SessionInfo;
+use crate::types::{SessionInfo, SessionRecord};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistedTopic {
+    pub thread_id: i32,
+    pub active_session_id: Option<String>,
+    pub sessions: Vec<SessionRecord>,
+}
 
 fn sessions_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
@@ -11,25 +19,53 @@ fn sessions_path() -> PathBuf {
         .join("sessions.json")
 }
 
-pub fn save_sessions(sessions: &[SessionInfo]) -> Result<()> {
+pub fn save_topics(topics: &[PersistedTopic]) -> Result<()> {
     let path = sessions_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let tmp_path = path.with_extension("json.tmp");
-    let data = serde_json::to_string_pretty(sessions)?;
+    let data = serde_json::to_string_pretty(topics)?;
     std::fs::write(&tmp_path, data)?;
     std::fs::rename(&tmp_path, &path)?;
     Ok(())
 }
 
-pub fn load_sessions() -> Vec<SessionInfo> {
+pub fn load_topics() -> Vec<PersistedTopic> {
     let path = sessions_path();
-    match std::fs::read_to_string(&path) {
-        Ok(data) => serde_json::from_str(&data).unwrap_or_else(|e| {
-            tracing::warn!("Failed to parse sessions file: {e}");
-            Vec::new()
-        }),
-        Err(_) => Vec::new(),
+    let data = match std::fs::read_to_string(&path) {
+        Ok(data) => data,
+        Err(_) => return Vec::new(),
+    };
+
+    // Try new format first
+    if let Ok(topics) = serde_json::from_str::<Vec<PersistedTopic>>(&data) {
+        return topics;
     }
+
+    // Fall back to legacy Vec<SessionInfo> format
+    if let Ok(sessions) = serde_json::from_str::<Vec<SessionInfo>>(&data) {
+        tracing::info!("Migrating {} legacy session(s) to topic format", sessions.len());
+        return sessions
+            .into_iter()
+            .map(|s| {
+                let now = chrono::Utc::now();
+                let record = SessionRecord {
+                    acp_session_id: s.acp_session_id.clone(),
+                    project_path: s.project_path,
+                    agent_command: s.agent_command,
+                    created_at: now,
+                    last_updated_at: now,
+                };
+                PersistedTopic {
+                    thread_id: s.thread_id,
+                    active_session_id: Some(s.acp_session_id),
+                    sessions: vec![record],
+                }
+            })
+            .collect();
+    }
+
+    tracing::warn!("Failed to parse sessions file in any known format");
+    Vec::new()
 }

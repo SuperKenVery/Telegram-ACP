@@ -1,4 +1,5 @@
 use agent_client_protocol as acp;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -53,6 +54,15 @@ pub enum SessionStatus {
     Prompting,
     Finished,
     Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionRecord {
+    pub acp_session_id: String,
+    pub project_path: PathBuf,
+    pub agent_command: String,
+    pub created_at: DateTime<Utc>,
+    pub last_updated_at: DateTime<Utc>,
 }
 
 // === Agent Events (sent from ACP Client impl to Telegram sender) ===

@@ -26,14 +26,15 @@ impl Command for PermissionCommand {
     }
 
     async fn execute(&self, ctx: CommandContext<'_>) -> Result<()> {
-        let state = get_control_state(ctx.daemon, ctx.thread_id).await?;
+        let thread_id = ctx.require_thread_id()?;
+        let state = get_control_state(ctx.daemon, thread_id).await?;
         if state.permission_modes.is_empty() {
             ctx.bot
                 .send_message(
                     ctx.msg.chat.id,
                     "This agent session does not expose permission modes.",
                 )
-                .message_thread_id(ThreadId(MessageId(ctx.thread_id)))
+                .message_thread_id(ThreadId(MessageId(thread_id)))
                 .await?;
             return Ok(());
         }
@@ -48,7 +49,7 @@ impl Command for PermissionCommand {
                 mode.name.clone()
             };
 
-            if let Some(data) = encode_callback(ctx.thread_id, &mode.id) {
+            if let Some(data) = encode_callback(thread_id, &mode.id) {
                 rows.push(vec![InlineKeyboardButton::callback(label, data)]);
             }
         }
@@ -59,7 +60,7 @@ impl Command for PermissionCommand {
                     ctx.msg.chat.id,
                     "Permission modes are available, but identifiers are too long for Telegram callback payloads.",
                 )
-                .message_thread_id(ThreadId(MessageId(ctx.thread_id)))
+                .message_thread_id(ThreadId(MessageId(thread_id)))
                 .await?;
             return Ok(());
         }
@@ -67,7 +68,7 @@ impl Command for PermissionCommand {
         let keyboard = InlineKeyboardMarkup::new(rows);
         ctx.bot
             .send_message(ctx.msg.chat.id, "Select permission mode:")
-            .message_thread_id(ThreadId(MessageId(ctx.thread_id)))
+            .message_thread_id(ThreadId(MessageId(thread_id)))
             .reply_markup(keyboard)
             .await?;
 

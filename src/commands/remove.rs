@@ -14,26 +14,28 @@ impl Command for RemoveCommand {
     }
 
     fn description(&self) -> &'static str {
-        "Delete this topic and remove its saved session"
+        "Delete this topic and remove its saved sessions"
     }
 
     async fn execute(&self, ctx: CommandContext<'_>) -> Result<()> {
+        let thread_id = ctx.require_thread_id()?;
+
         if !ctx.args.trim().is_empty() {
             ctx.bot
                 .send_message(ctx.msg.chat.id, "Usage: /remove")
-                .message_thread_id(ThreadId(MessageId(ctx.thread_id)))
+                .message_thread_id(ThreadId(MessageId(thread_id)))
                 .await?;
             return Ok(());
         }
 
         ctx.bot
-            .delete_forum_topic(ctx.msg.chat.id, ThreadId(MessageId(ctx.thread_id)))
+            .delete_forum_topic(ctx.msg.chat.id, ThreadId(MessageId(thread_id)))
             .await?;
 
-        let removed = ctx.daemon.remove_session(ctx.thread_id).await.is_some();
+        let removed = ctx.daemon.remove_topic(thread_id).await.is_some();
 
         let summary = if removed {
-            "Topic deleted. Session removed."
+            "Topic deleted. All sessions removed."
         } else {
             "Topic deleted."
         };
