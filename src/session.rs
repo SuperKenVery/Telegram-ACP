@@ -81,6 +81,7 @@ pub async fn run_session_runtime(
     mut cancel_rx: mpsc::UnboundedReceiver<oneshot::Sender<anyhow::Result<()>>>,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
     status: Arc<Mutex<SessionStatus>>,
+    control_state: Arc<Mutex<crate::session_control::SessionControlState>>,
     mut mode_state: Option<acp::SessionModeState>,
     mut config_options: Vec<acp::SessionConfigOption>,
 ) {
@@ -110,9 +111,6 @@ pub async fn run_session_runtime(
                             prompt_active = true;
                         }
                     }
-                    Some(SessionCommand::GetControlState { result_tx }) => {
-                        let _ = result_tx.send(Ok(build_control_state(&mode_state, &config_options)));
-                    }
                     Some(SessionCommand::SetPermissionMode { mode_id, result_tx }) => {
                         let result = conn
                             .set_session_mode(acp::SetSessionModeRequest::new(
@@ -120,15 +118,15 @@ pub async fn run_session_runtime(
                                 mode_id.clone(),
                             ))
                             .await
-                            .map(|_| {
-                                if let Some(state) = &mut mode_state {
-                                    state.current_mode_id = acp::SessionModeId::new(mode_id.clone());
-                                }
-                                build_control_state(&mode_state, &config_options)
-                            })
                             .map_err(|e| anyhow::anyhow!("Failed to set permission mode: {e}"));
 
-                        let _ = result_tx.send(result);
+                        if result.is_ok() {
+                            if let Some(state) = &mut mode_state {
+                                state.current_mode_id = acp::SessionModeId::new(mode_id.clone());
+                            }
+                            *control_state.lock().await = build_control_state(&mode_state, &config_options);
+                        }
+                        let _ = result_tx.send(result.map(|_| ()));
                     }
                     Some(SessionCommand::SetConfigOption {
                         config_id,
@@ -142,13 +140,18 @@ pub async fn run_session_runtime(
                                 value_id,
                             ))
                             .await
-                            .map(|resp| {
-                                config_options = resp.config_options;
-                                build_control_state(&mode_state, &config_options)
-                            })
                             .map_err(|e| anyhow::anyhow!("Failed to set config option: {e}"));
 
-                        let _ = result_tx.send(result);
+                        match result {
+                            Ok(resp) => {
+                                config_options = resp.config_options;
+                                *control_state.lock().await = build_control_state(&mode_state, &config_options);
+                                let _ = result_tx.send(Ok(()));
+                            }
+                            Err(e) => {
+                                let _ = result_tx.send(Err(e));
+                            }
+                        }
                     }
                     None => {
                         command_closed = true;

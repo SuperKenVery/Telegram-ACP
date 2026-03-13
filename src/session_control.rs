@@ -25,17 +25,14 @@ pub struct SessionControlState {
 #[derive(Debug)]
 pub enum SessionCommand {
     Prompt(String),
-    GetControlState {
-        result_tx: oneshot::Sender<Result<SessionControlState>>,
-    },
     SetPermissionMode {
         mode_id: String,
-        result_tx: oneshot::Sender<Result<SessionControlState>>,
+        result_tx: oneshot::Sender<Result<()>>,
     },
     SetConfigOption {
         config_id: String,
         value_id: String,
-        result_tx: oneshot::Sender<Result<SessionControlState>>,
+        result_tx: oneshot::Sender<Result<()>>,
     },
 }
 

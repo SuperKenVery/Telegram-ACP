@@ -3,7 +3,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 use teloxide::prelude::*;
-use teloxide::types::{CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, MessageId, ThreadId};
+use teloxide::types::{
+    CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, MessageId, ThreadId,
+};
 
 use crate::daemon::DaemonHandle;
 
@@ -49,7 +51,7 @@ impl Command for SwitchCommand {
         let active_id = topic
             .as_ref()
             .and_then(|e| e.active.as_ref())
-            .map(|s| s.acp_session_id.as_str());
+            .and_then(|s| s.acp_session_id.as_deref());
 
         let mut rows = Vec::new();
         let mut line_text = String::from("History:\n");
@@ -150,7 +152,8 @@ pub async fn try_handle_callback(
         if topic
             .active
             .as_ref()
-            .map(|s| s.acp_session_id == record.acp_session_id)
+            .and_then(|s| s.acp_session_id.as_deref())
+            .map(|id| id == record.acp_session_id)
             .unwrap_or(false)
         {
             bot.answer_callback_query(query.id.clone())
@@ -165,7 +168,10 @@ pub async fn try_handle_callback(
     match daemon.switch_to_session(thread_id, &record).await {
         Ok(new_id) => {
             bot.answer_callback_query(query.id.clone())
-                .text(format!("Switched to session {}", &new_id[..8.min(new_id.len())]))
+                .text(format!(
+                    "Switched to session {}",
+                    &new_id[..8.min(new_id.len())]
+                ))
                 .await?;
         }
         Err(e) => {

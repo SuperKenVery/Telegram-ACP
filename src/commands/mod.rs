@@ -1,13 +1,12 @@
 use std::sync::Arc;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use teloxide::prelude::*;
 use teloxide::types::{BotCommand, CallbackQuery, Message};
-use tokio::sync::oneshot;
 
 use crate::daemon::DaemonHandle;
-use crate::session_control::{SessionCommand, SessionControlState};
+use crate::session_control::SessionControlState;
 
 mod cancel;
 mod command;
@@ -189,16 +188,13 @@ pub(super) async fn get_control_state(
     daemon: &DaemonHandle,
     thread_id: i32,
 ) -> Result<SessionControlState> {
-    let command_tx = daemon
-        .get_session_command_tx_by_thread(thread_id)
+    let entry = daemon
+        .topics
+        .get(&thread_id)
+        .and_then(|t| t.active.as_ref().map(|s| s.control_state.clone()))
         .ok_or_else(|| anyhow!("No active session in this topic"))?;
-    let (result_tx, result_rx) = oneshot::channel();
-
-    command_tx
-        .send(SessionCommand::GetControlState { result_tx })
-        .context("Failed to query session controls")?;
-
-    result_rx.await.context("Session control query dropped")?
+    let state = entry.lock().await.clone();
+    Ok(state)
 }
 
 pub(super) async fn set_permission_mode(
@@ -206,19 +202,29 @@ pub(super) async fn set_permission_mode(
     thread_id: i32,
     mode_id: &str,
 ) -> Result<SessionControlState> {
-    let command_tx = daemon
-        .get_session_command_tx_by_thread(thread_id)
+    let (command_tx, control_state) = daemon
+        .topics
+        .get(&thread_id)
+        .and_then(|t| {
+            t.active
+                .as_ref()
+                .map(|s| (s.command_tx.clone(), s.control_state.clone()))
+        })
         .ok_or_else(|| anyhow!("No active session in this topic"))?;
-    let (result_tx, result_rx) = oneshot::channel();
 
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     command_tx
-        .send(SessionCommand::SetPermissionMode {
+        .send(crate::session_control::SessionCommand::SetPermissionMode {
             mode_id: mode_id.to_string(),
             result_tx,
         })
-        .context("Failed to send permission mode request")?;
+        .map_err(|_| anyhow!("Session command channel closed"))?;
+    result_rx
+        .await
+        .map_err(|_| anyhow!("Permission mode request dropped"))??;
 
-    result_rx.await.context("Permission mode request dropped")?
+    let state = control_state.lock().await.clone();
+    Ok(state)
 }
 
 pub(super) async fn set_config_option(
@@ -227,20 +233,30 @@ pub(super) async fn set_config_option(
     config_id: &str,
     value_id: &str,
 ) -> Result<SessionControlState> {
-    let command_tx = daemon
-        .get_session_command_tx_by_thread(thread_id)
+    let (command_tx, control_state) = daemon
+        .topics
+        .get(&thread_id)
+        .and_then(|t| {
+            t.active
+                .as_ref()
+                .map(|s| (s.command_tx.clone(), s.control_state.clone()))
+        })
         .ok_or_else(|| anyhow!("No active session in this topic"))?;
-    let (result_tx, result_rx) = oneshot::channel();
 
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     command_tx
-        .send(SessionCommand::SetConfigOption {
+        .send(crate::session_control::SessionCommand::SetConfigOption {
             config_id: config_id.to_string(),
             value_id: value_id.to_string(),
             result_tx,
         })
-        .context("Failed to send model selection request")?;
+        .map_err(|_| anyhow!("Session command channel closed"))?;
+    result_rx
+        .await
+        .map_err(|_| anyhow!("Config option request dropped"))??;
 
-    result_rx.await.context("Model selection request dropped")?
+    let state = control_state.lock().await.clone();
+    Ok(state)
 }
 
 pub(super) async fn cancel_prompt(daemon: &DaemonHandle, thread_id: i32) -> Result<()> {

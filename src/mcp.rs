@@ -4,18 +4,8 @@ use base64::Engine;
 use futures::channel::mpsc;
 use futures::StreamExt;
 use rmcp::model::{
-    CallToolRequestParams,
-    CallToolResult,
-    Content,
-    ErrorCode,
-    ErrorData,
-    Implementation,
-    ListToolsResult,
-    PaginatedRequestParams,
-    ProtocolVersion,
-    ServerCapabilities,
-    ServerInfo,
-    Tool,
+    CallToolRequestParams, CallToolResult, Content, ErrorCode, ErrorData, Implementation,
+    ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::{RequestContext, RxJsonRpcMessage, TxJsonRpcMessage};
 use rmcp::{RoleServer, ServerHandler, ServiceExt};
@@ -58,16 +48,12 @@ impl McpServer {
 
 impl ServerHandler for McpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
-            ServerCapabilities::builder()
-                .enable_tools()
-                .build(),
-        )
-        .with_server_info(
-            Implementation::new("telegram-acp", env!("CARGO_PKG_VERSION"))
-                .with_title("Telegram MCP Relay"),
-        )
-        .with_protocol_version(ProtocolVersion::V_2025_03_26)
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(
+                Implementation::new("telegram-acp", env!("CARGO_PKG_VERSION"))
+                    .with_title("Telegram MCP Relay"),
+            )
+            .with_protocol_version(ProtocolVersion::V_2025_03_26)
     }
 
     async fn list_tools(
@@ -163,15 +149,21 @@ impl McpSession {
         let (outgoing_tx, outgoing_rx) = mpsc::unbounded();
 
         let server = McpServer::new(bot, telegraph, chat_id, thread_id, project_path);
+        let session_id_for_log = id.clone();
         // Spawn the MCP serve handshake in the background. It will block until
         // the agent subprocess connects and sends the MCP initialize request.
         // We must not await it here because the agent hasn't been spawned yet.
         tokio::task::spawn_local(async move {
+            tracing::debug!(session_id = %session_id_for_log, "MCP server task started, waiting for initialize");
             match server.serve((outgoing_tx, incoming_rx)).await {
                 Ok(service) => {
+                    tracing::debug!(session_id = %session_id_for_log, "MCP server handshake complete, waiting for session end");
                     let _ = service.waiting().await;
+                    tracing::debug!(session_id = %session_id_for_log, "MCP server session ended");
                 }
-                Err(e) => tracing::warn!("MCP server init error: {e}"),
+                Err(e) => {
+                    tracing::warn!(session_id = %session_id_for_log, "MCP server init error: {e}")
+                }
             }
         });
 
@@ -183,15 +175,27 @@ impl McpSession {
     }
 
     pub async fn send(&self, message: RxJsonRpcMessage<RoleServer>) -> Result<()> {
+        tracing::debug!(session_id = %self.id, "MCP session: sending message to server");
         let tx = self.incoming_tx.lock().await;
-        tx.unbounded_send(message)
-            .map_err(|_| anyhow!("MCP incoming channel closed"))?;
+        tx.unbounded_send(message).map_err(|e| {
+            tracing::error!(session_id = %self.id, "MCP incoming channel closed: {e}");
+            anyhow!("MCP incoming channel closed")
+        })?;
+        tracing::debug!(session_id = %self.id, "MCP session: message enqueued");
         Ok(())
     }
 
     pub async fn next_response(&self) -> Option<TxJsonRpcMessage<RoleServer>> {
+        tracing::debug!(session_id = %self.id, "MCP session: waiting for response");
         let mut rx = self.outgoing_rx.lock().await;
-        rx.next().await
+        let result = rx.next().await;
+        match &result {
+            Some(_) => tracing::debug!(session_id = %self.id, "MCP session: got response"),
+            None => {
+                tracing::warn!(session_id = %self.id, "MCP session: outgoing channel closed, no response")
+            }
+        }
+        result
     }
 }
 
@@ -250,7 +254,12 @@ impl McpServer {
         request: CallToolRequestParams,
     ) -> Result<CallToolResult, ErrorData> {
         let args = parse_args::<UploadFileArgs>(request.arguments)?;
-        let (input, filename) = build_input_file(&self.project_path, args.path, args.content_base64, args.filename)?;
+        let (input, filename) = build_input_file(
+            &self.project_path,
+            args.path,
+            args.content_base64,
+            args.filename,
+        )?;
 
         let thread_id = ThreadId(MessageId(self.thread_id));
         let mut request = self
@@ -274,7 +283,12 @@ impl McpServer {
         request: CallToolRequestParams,
     ) -> Result<CallToolResult, ErrorData> {
         let args = parse_args::<UploadImageArgs>(request.arguments)?;
-        let (input, filename) = build_input_file(&self.project_path, args.path, args.content_base64, args.filename)?;
+        let (input, filename) = build_input_file(
+            &self.project_path,
+            args.path,
+            args.content_base64,
+            args.filename,
+        )?;
 
         let thread_id = ThreadId(MessageId(self.thread_id));
         let mut request = self
