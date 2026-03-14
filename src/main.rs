@@ -15,8 +15,12 @@ mod telegraph;
 mod types;
 
 use clap::{Parser, Subcommand};
+use rolling_file::{BasicRollingFileAppender, RollingConditionBasic};
 use std::env;
 use std::path::PathBuf;
+use std::sync::Mutex;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 
 #[derive(Parser)]
 #[command(name = "telegram-acp", about = "Bridge Telegram and ACP coding agents")]
@@ -55,10 +59,28 @@ enum Commands {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+    let log_dir = dirs::data_local_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("telegram-acp");
+    std::fs::create_dir_all(&log_dir)?;
+
+    let file_appender = BasicRollingFileAppender::new(
+        log_dir.join("telegram-acp.log"),
+        RollingConditionBasic::new().daily().max_size(1_000_000),
+        3,
+    )
+    .expect("failed to create log file appender");
+
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(Mutex::new(file_appender)),
         )
         .init();
 
