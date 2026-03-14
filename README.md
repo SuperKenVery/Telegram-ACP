@@ -144,4 +144,4 @@ src/
 
 ## License
 
-Add your preferred license here.
+GPL v3
