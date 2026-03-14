@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - 'v*'
+    branches:
+      - main
 
 env:
   CARGO_TERM_COLOR: always
@@ -86,8 +88,19 @@ jobs:
         with:
           path: artifacts
 
-      - name: Create release
+      - name: Create versioned release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/**/*.tar.gz
           generate_release_notes: true
+
+      - name: Create rolling latest release (on main push)
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest (main)
+          files: artifacts/**/*.tar.gz
+          generate_release_notes: false
+          prerelease: true
