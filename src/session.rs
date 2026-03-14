@@ -1,21 +1,16 @@
 use acp::Agent;
 use agent_client_protocol as acp;
+use anyhow::Result;
 use similar::TextDiff;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId, ParseMode, ThreadId};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, Mutex};
 use tokio::time::{sleep_until, Duration, Instant};
 
 use crate::formatting;
-use crate::session_control::{build_control_state, SessionCommand};
-use crate::types::{AgentEvent, SessionStatus};
-
-enum PromptOutcome {
-    Finished(String),
-    Error(String),
-}
+use crate::types::{build_control_state, AgentEvent, SessionControlState, SessionStatus};
 
 struct OutboundThrottle {
     min_interval: Duration,
@@ -71,172 +66,275 @@ struct ToolCallMessageState {
     details: Option<String>,
 }
 
-pub async fn run_session_runtime(
+struct SessionInner {
     conn: Arc<acp::ClientSideConnection>,
     acp_session_id: acp::SessionId,
+    status: SessionStatus,
+    control_state: SessionControlState,
+    mode_state: Option<acp::SessionModeState>,
+    config_options: Vec<acp::SessionConfigOption>,
+    pending_prompts: VecDeque<String>,
+    event_tx: mpsc::UnboundedSender<AgentEvent>,
     bot: Bot,
     chat_id: ChatId,
     thread_id: i32,
-    mut command_rx: mpsc::UnboundedReceiver<SessionCommand>,
-    mut cancel_rx: mpsc::UnboundedReceiver<oneshot::Sender<anyhow::Result<()>>>,
-    event_tx: mpsc::UnboundedSender<AgentEvent>,
-    status: Arc<Mutex<SessionStatus>>,
-    control_state: Arc<Mutex<crate::session_control::SessionControlState>>,
-    mut mode_state: Option<acp::SessionModeState>,
-    mut config_options: Vec<acp::SessionConfigOption>,
-) {
-    let (prompt_done_tx, mut prompt_done_rx) = mpsc::unbounded_channel::<PromptOutcome>();
-    let mut prompt_active = false;
-    let mut command_closed = false;
-    let mut cancel_closed = false;
-    let mut pending_prompts = VecDeque::<String>::new();
+}
 
-    while !(command_closed && cancel_closed && !prompt_active && pending_prompts.is_empty()) {
-        tokio::select! {
-            maybe_cmd = command_rx.recv(), if !command_closed => {
-                match maybe_cmd {
-                    Some(SessionCommand::Prompt(user_text)) => {
-                        if prompt_active {
-                            pending_prompts.push_back(user_text);
-                            send_queued_notice(&bot, chat_id, thread_id, &pending_prompts).await;
-                        } else {
-                            start_prompt(
-                                conn.clone(),
-                                acp_session_id.clone(),
-                                user_text,
-                                event_tx.clone(),
-                                status.clone(),
-                                prompt_done_tx.clone(),
-                            ).await;
-                            prompt_active = true;
-                        }
-                    }
-                    Some(SessionCommand::SetPermissionMode { mode_id, result_tx }) => {
-                        let result = conn
-                            .set_session_mode(acp::SetSessionModeRequest::new(
-                                acp_session_id.clone(),
-                                mode_id.clone(),
-                            ))
-                            .await
-                            .map_err(|e| anyhow::anyhow!("Failed to set permission mode: {e}"));
+enum ControlOp {
+    Cancel {
+        result_tx: tokio::sync::oneshot::Sender<Result<()>>,
+    },
+    SetPermissionMode {
+        mode_id: String,
+        result_tx: tokio::sync::oneshot::Sender<Result<SessionControlState>>,
+    },
+    SetConfigOption {
+        config_id: String,
+        value_id: String,
+        result_tx: tokio::sync::oneshot::Sender<Result<SessionControlState>>,
+    },
+}
 
-                        if result.is_ok() {
-                            if let Some(state) = &mut mode_state {
-                                state.current_mode_id = acp::SessionModeId::new(mode_id.clone());
-                            }
-                            *control_state.lock().await = build_control_state(&mode_state, &config_options);
-                        }
-                        let _ = result_tx.send(result.map(|_| ()));
-                    }
-                    Some(SessionCommand::SetConfigOption {
-                        config_id,
-                        value_id,
-                        result_tx,
-                    }) => {
-                        let result = conn
-                            .set_session_config_option(acp::SetSessionConfigOptionRequest::new(
-                                acp_session_id.clone(),
-                                config_id,
-                                value_id,
-                            ))
-                            .await
-                            .map_err(|e| anyhow::anyhow!("Failed to set config option: {e}"));
+pub struct Session {
+    inner: Mutex<SessionInner>,
+    /// Send a prompt text into the LocalSet-bound prompt loop.
+    prompt_tx: mpsc::UnboundedSender<String>,
+    /// Send control operations into the LocalSet-bound control loop.
+    control_tx: mpsc::UnboundedSender<ControlOp>,
+}
 
-                        match result {
-                            Ok(resp) => {
-                                config_options = resp.config_options;
-                                *control_state.lock().await = build_control_state(&mode_state, &config_options);
-                                let _ = result_tx.send(Ok(()));
-                            }
-                            Err(e) => {
-                                let _ = result_tx.send(Err(e));
-                            }
-                        }
-                    }
-                    None => {
-                        command_closed = true;
-                    }
-                }
+impl Session {
+    pub fn new(
+        conn: Arc<acp::ClientSideConnection>,
+        acp_session_id: acp::SessionId,
+        mode_state: Option<acp::SessionModeState>,
+        config_options: Vec<acp::SessionConfigOption>,
+        event_tx: mpsc::UnboundedSender<AgentEvent>,
+        bot: Bot,
+        chat_id: ChatId,
+        thread_id: i32,
+    ) -> Arc<Self> {
+        let control_state = build_control_state(&mode_state, &config_options);
+        let (prompt_tx, prompt_rx) = mpsc::unbounded_channel::<String>();
+        let (control_tx, control_rx) = mpsc::unbounded_channel::<ControlOp>();
+        let session = Arc::new(Self {
+            inner: Mutex::new(SessionInner {
+                conn,
+                acp_session_id,
+                status: SessionStatus::Idle,
+                control_state,
+                mode_state,
+                config_options,
+                pending_prompts: VecDeque::new(),
+                event_tx,
+                bot,
+                chat_id,
+                thread_id,
+            }),
+            prompt_tx,
+            control_tx,
+        });
+        // Spawn loops in the LocalSet — they are !Send and own ACP calls.
+        tokio::task::spawn_local(run_prompt_loop(session.clone(), prompt_rx));
+        tokio::task::spawn_local(run_control_loop(session.clone(), control_rx));
+        session
+    }
+
+    pub async fn get_status(&self) -> SessionStatus {
+        self.inner.lock().await.status
+    }
+
+    pub async fn get_control_state(&self) -> SessionControlState {
+        self.inner.lock().await.control_state.clone()
+    }
+
+    /// Enqueue a prompt. This is Send-safe: it only sends to an mpsc channel.
+    pub fn send_prompt(&self, text: String) {
+        let _ = self.prompt_tx.send(text);
+    }
+
+    /// Called by the prompt loop when a prompt finishes.
+    async fn on_prompt_done(&self, result: acp::Result<acp::PromptResponse>) -> Option<String> {
+        let mut inner = self.inner.lock().await;
+        match result {
+            Ok(resp) => {
+                let _ = inner
+                    .event_tx
+                    .send(AgentEvent::Finished(format!("{:?}", resp.stop_reason)));
             }
-            maybe_cancel = cancel_rx.recv(), if !cancel_closed => {
-                match maybe_cancel {
-                    Some(result_tx) => {
-                        let result = conn
-                            .cancel(acp::CancelNotification::new(acp_session_id.clone()))
-                            .await
-                            .map_err(|e| anyhow::anyhow!("Failed to cancel session: {e}"));
-                        let _ = result_tx.send(result);
-                    }
-                    None => {
-                        cancel_closed = true;
-                    }
-                }
+            Err(e) => {
+                let _ = inner
+                    .event_tx
+                    .send(AgentEvent::Error(format!("Agent error: {e}")));
             }
-            maybe_done = prompt_done_rx.recv(), if prompt_active => {
-                match maybe_done {
-                    Some(PromptOutcome::Finished(reason)) => {
-                        let _ = event_tx.send(AgentEvent::Finished(reason));
-                    }
-                    Some(PromptOutcome::Error(err)) => {
-                        let _ = event_tx.send(AgentEvent::Error(err));
-                    }
-                    None => {
-                        let _ = event_tx.send(AgentEvent::Error("Prompt runner closed unexpectedly".to_string()));
-                    }
-                }
-
-                if let Some(next_prompt) = pending_prompts.pop_front() {
-                    start_prompt(
-                        conn.clone(),
-                        acp_session_id.clone(),
-                        next_prompt,
-                        event_tx.clone(),
-                        status.clone(),
-                        prompt_done_tx.clone(),
-                    ).await;
-                    prompt_active = true;
-                } else {
-                    prompt_active = false;
-                    let mut s = status.lock().await;
-                    *s = SessionStatus::Idle;
-                }
-            }
+        }
+        if let Some(next) = inner.pending_prompts.pop_front() {
+            let _ = inner.event_tx.send(AgentEvent::Working);
+            Some(next)
+        } else {
+            inner.status = SessionStatus::Idle;
+            None
         }
     }
 
-    let mut s = status.lock().await;
-    *s = SessionStatus::Finished;
-}
-
-async fn start_prompt(
-    conn: Arc<acp::ClientSideConnection>,
-    acp_session_id: acp::SessionId,
-    user_text: String,
-    event_tx: mpsc::UnboundedSender<AgentEvent>,
-    status: Arc<Mutex<SessionStatus>>,
-    prompt_done_tx: mpsc::UnboundedSender<PromptOutcome>,
-) {
-    {
-        let mut s = status.lock().await;
-        *s = SessionStatus::Prompting;
+    /// Send-safe: dispatches to the LocalSet control loop and waits for result.
+    pub async fn cancel(&self) -> Result<()> {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let _ = self.control_tx.send(ControlOp::Cancel { result_tx });
+        result_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("Cancel request dropped"))?
     }
 
-    let _ = event_tx.send(AgentEvent::Working);
+    /// Send-safe: dispatches to the LocalSet control loop and waits for result.
+    pub async fn set_permission_mode(&self, mode_id: &str) -> Result<SessionControlState> {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let _ = self.control_tx.send(ControlOp::SetPermissionMode {
+            mode_id: mode_id.to_string(),
+            result_tx,
+        });
+        result_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("Permission mode request dropped"))?
+    }
 
-    tokio::task::spawn_local(async move {
-        let prompt_result = conn
-            .prompt(acp::PromptRequest::new(
-                acp_session_id,
-                vec![user_text.into()],
-            ))
-            .await;
+    /// Send-safe: dispatches to the LocalSet control loop and waits for result.
+    pub async fn set_config_option(
+        &self,
+        config_id: &str,
+        value_id: &str,
+    ) -> Result<SessionControlState> {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let _ = self.control_tx.send(ControlOp::SetConfigOption {
+            config_id: config_id.to_string(),
+            value_id: value_id.to_string(),
+            result_tx,
+        });
+        result_rx
+            .await
+            .map_err(|_| anyhow::anyhow!("Config option request dropped"))?
+    }
+}
 
-        let outcome = match prompt_result {
-            Ok(resp) => PromptOutcome::Finished(format!("{:?}", resp.stop_reason)),
-            Err(e) => PromptOutcome::Error(format!("Agent error: {e}")),
-        };
-        let _ = prompt_done_tx.send(outcome);
-    });
+/// Drives prompt execution for a session inside the LocalSet.
+/// Reads prompts from `prompt_rx`, runs them sequentially against the ACP agent.
+/// Also handles queued prompts that arrived while a prompt was in flight.
+async fn run_prompt_loop(session: Arc<Session>, mut prompt_rx: mpsc::UnboundedReceiver<String>) {
+    while let Some(text) = prompt_rx.recv().await {
+        // Check if already prompting — if so, queue and notify.
+        {
+            let mut inner = session.inner.lock().await;
+            if inner.status == SessionStatus::Prompting {
+                inner.pending_prompts.push_back(text.clone());
+                let bot = inner.bot.clone();
+                let chat_id = inner.chat_id;
+                let thread_id = inner.thread_id;
+                let pending = inner.pending_prompts.clone();
+                drop(inner);
+                send_queued_notice(&bot, chat_id, thread_id, &pending).await;
+                continue;
+            }
+            inner.status = SessionStatus::Prompting;
+            let _ = inner.event_tx.send(AgentEvent::Working);
+        }
+
+        // Run this prompt, then drain any queued ones.
+        let mut current = text;
+        loop {
+            let (conn, acp_session_id) = {
+                let inner = session.inner.lock().await;
+                (inner.conn.clone(), inner.acp_session_id.clone())
+            };
+            let result = conn
+                .prompt(acp::PromptRequest::new(
+                    acp_session_id,
+                    vec![current.into()],
+                ))
+                .await;
+            match session.on_prompt_done(result).await {
+                Some(next) => current = next,
+                None => break,
+            }
+        }
+    }
+}
+
+/// Handles control operations (cancel, set_permission_mode, set_config_option) inside the LocalSet.
+/// These involve !Send ACP futures so they must run here, not in the Send dispatcher.
+async fn run_control_loop(
+    session: Arc<Session>,
+    mut control_rx: mpsc::UnboundedReceiver<ControlOp>,
+) {
+    while let Some(op) = control_rx.recv().await {
+        match op {
+            ControlOp::Cancel { result_tx } => {
+                let (conn, acp_session_id) = {
+                    let inner = session.inner.lock().await;
+                    (inner.conn.clone(), inner.acp_session_id.clone())
+                };
+                let result = conn
+                    .cancel(acp::CancelNotification::new(acp_session_id))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to cancel session: {e}"));
+                let _ = result_tx.send(result);
+            }
+            ControlOp::SetPermissionMode { mode_id, result_tx } => {
+                let (conn, acp_session_id) = {
+                    let inner = session.inner.lock().await;
+                    (inner.conn.clone(), inner.acp_session_id.clone())
+                };
+                let result = conn
+                    .set_session_mode(acp::SetSessionModeRequest::new(
+                        acp_session_id,
+                        mode_id.clone(),
+                    ))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to set permission mode: {e}"));
+                let outcome = match result {
+                    Ok(_) => {
+                        let mut inner = session.inner.lock().await;
+                        if let Some(state) = &mut inner.mode_state {
+                            state.current_mode_id = acp::SessionModeId::new(mode_id);
+                        }
+                        inner.control_state =
+                            build_control_state(&inner.mode_state, &inner.config_options);
+                        Ok(inner.control_state.clone())
+                    }
+                    Err(e) => Err(e),
+                };
+                let _ = result_tx.send(outcome);
+            }
+            ControlOp::SetConfigOption {
+                config_id,
+                value_id,
+                result_tx,
+            } => {
+                let (conn, acp_session_id) = {
+                    let inner = session.inner.lock().await;
+                    (inner.conn.clone(), inner.acp_session_id.clone())
+                };
+                let result = conn
+                    .set_session_config_option(acp::SetSessionConfigOptionRequest::new(
+                        acp_session_id,
+                        config_id,
+                        value_id,
+                    ))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to set config option: {e}"));
+                let outcome = match result {
+                    Ok(resp) => {
+                        let mut inner = session.inner.lock().await;
+                        inner.config_options = resp.config_options;
+                        inner.control_state =
+                            build_control_state(&inner.mode_state, &inner.config_options);
+                        Ok(inner.control_state.clone())
+                    }
+                    Err(e) => Err(e),
+                };
+                let _ = result_tx.send(outcome);
+            }
+        }
+    }
 }
 
 fn build_interrupt_callback_data(thread_id: i32) -> String {

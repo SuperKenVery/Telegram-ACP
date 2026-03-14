@@ -4,8 +4,6 @@ use teloxide::prelude::*;
 use teloxide::types::{MessageId, ThreadId};
 use tokio::time::{sleep, Duration};
 
-use crate::session_control::SessionCommand;
-
 use super::{Command, CommandContext};
 
 const MAX_REPEAT: usize = 10;
@@ -25,21 +23,19 @@ impl Command for TimerCommand {
     async fn execute(&self, ctx: CommandContext<'_>) -> Result<()> {
         let thread_id = ctx.require_thread_id()?;
         let args = parse_timer_args(ctx.args)?;
-        let command_tx = ctx
+        let session = ctx
             .daemon
-            .get_session_command_tx_by_thread(thread_id)
+            .get_session_by_thread(thread_id)
             .ok_or_else(|| anyhow!("No active session in this topic"))?;
 
         let prompt = args.prompt.clone();
         let repeat = args.repeat;
         let interval = args.interval;
 
-        tokio::spawn(async move {
+        tokio::task::spawn_local(async move {
             for _ in 0..repeat {
                 sleep(interval).await;
-                if command_tx.send(SessionCommand::Prompt(prompt.clone())).is_err() {
-                    break;
-                }
+                session.send_prompt(prompt.clone());
             }
         });
 
@@ -98,9 +94,9 @@ fn parse_timer_args(args: &str) -> Result<TimerArgs> {
             if repeat.is_some() {
                 anyhow::bail!("Repeat specified more than once");
             }
-            let parsed = value.parse::<usize>().map_err(|_| {
-                anyhow!("Repeat must be a number between 1 and {MAX_REPEAT}")
-            })?;
+            let parsed = value
+                .parse::<usize>()
+                .map_err(|_| anyhow!("Repeat must be a number between 1 and {MAX_REPEAT}"))?;
             repeat = Some(parsed);
             continue;
         }
@@ -161,9 +157,9 @@ fn parse_interval(raw: &str) -> Result<Duration> {
             anyhow::bail!("Interval must be like 10m, 2h, or 2h30m");
         }
 
-        let value = number.parse::<u64>().map_err(|_| {
-            anyhow!("Interval must be like 10m, 2h, or 2h30m")
-        })?;
+        let value = number
+            .parse::<u64>()
+            .map_err(|_| anyhow!("Interval must be like 10m, 2h, or 2h30m"))?;
         number.clear();
 
         match ch {

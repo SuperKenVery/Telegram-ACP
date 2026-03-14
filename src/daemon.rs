@@ -19,7 +19,6 @@ use crate::config::Config;
 use crate::mcp;
 use crate::persistence::{self, PersistedTopic};
 use crate::session;
-use crate::session_control::{self, SessionCommand};
 use crate::telegram;
 use crate::types::{AgentEvent, SessionRecord, SessionStatus};
 
@@ -48,11 +47,8 @@ pub struct SessionEntry {
     pub mcp: Arc<mcp::McpSession>,
     pub project_path: PathBuf,
     pub agent_command: String,
-    pub status: Arc<tokio::sync::Mutex<SessionStatus>>,
     pub available_commands: Arc<tokio::sync::Mutex<Vec<acp_sdk::AvailableCommand>>>,
-    pub control_state: Arc<tokio::sync::Mutex<session_control::SessionControlState>>,
-    pub command_tx: mpsc::UnboundedSender<SessionCommand>,
-    pub cancel_tx: mpsc::UnboundedSender<oneshot::Sender<Result<()>>>,
+    pub session: Option<Arc<session::Session>>,
 }
 
 struct StartSessionRequest {
@@ -119,24 +115,10 @@ impl DaemonHandle {
     }
 
     pub async fn cancel_session(&self, thread_id: i32) -> Result<()> {
-        let cancel_tx = {
-            let entry = self
-                .topics
-                .get(&thread_id)
-                .ok_or_else(|| anyhow::anyhow!("No topic for this thread"))?;
-            let active = entry
-                .active
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("No active session in this topic"))?;
-            active.cancel_tx.clone()
-        };
-        let (result_tx, result_rx) = oneshot::channel();
-        cancel_tx
-            .send(result_tx)
-            .map_err(|_| anyhow::anyhow!("Session cancel channel closed"))?;
-        result_rx
-            .await
-            .map_err(|_| anyhow::anyhow!("Cancel request dropped"))?
+        let session = self
+            .get_session_by_thread(thread_id)
+            .ok_or_else(|| anyhow::anyhow!("No active session in this topic"))?;
+        session.cancel().await
     }
 
     /// Remove a topic from in-memory state and persisted storage.
@@ -146,15 +128,12 @@ impl DaemonHandle {
         Some(entry)
     }
 
-    pub fn get_session_command_tx_by_thread(
-        &self,
-        thread_id: i32,
-    ) -> Option<mpsc::UnboundedSender<SessionCommand>> {
+    pub fn get_session_by_thread(&self, thread_id: i32) -> Option<Arc<session::Session>> {
         self.topics
             .get(&thread_id)?
             .active
             .as_ref()
-            .map(|e| e.command_tx.clone())
+            .and_then(|e| e.session.clone())
     }
 
     pub fn get_session_project_path_by_thread(&self, thread_id: i32) -> Option<PathBuf> {
@@ -361,13 +340,9 @@ impl DaemonHandle {
         agent_name: Option<String>,
         existing_acp_session_id: Option<String>,
     ) -> Result<String> {
-        // Channels
-        let (command_tx, command_rx) = mpsc::unbounded_channel::<SessionCommand>();
-        let (cancel_tx, cancel_rx) = mpsc::unbounded_channel::<oneshot::Sender<Result<()>>>();
         let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentEvent>();
         let available_commands = Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
-        let status = Arc::new(tokio::sync::Mutex::new(SessionStatus::Initializing));
         let mcp_session = Arc::new(
             mcp::McpSession::new(
                 self.bot.clone(),
@@ -385,35 +360,24 @@ impl DaemonHandle {
         let bot = self.bot.clone();
         let chat_id = ChatId(self.config.chat_id);
         tokio::task::spawn_local(session::run_event_consumer(
-            bot,
+            bot.clone(),
             chat_id,
             thread_id,
             event_rx,
             available_commands.clone(),
         ));
 
-        // Insert a SessionEntry with a placeholder acp_session_id into topics
-        // *before* spawning the agent. This allows the mcp-relay subprocess to
-        // route its MCP `initialize` request through the IPC handler
-        // (get_mcp_session_by_id) while ACP init is still in flight.
-        let control_state = Arc::new(tokio::sync::Mutex::new(
-            session_control::SessionControlState {
-                current_permission_mode_id: None,
-                permission_modes: Vec::new(),
-                model_selector: None,
-            },
-        ));
+        // Insert a SessionEntry *before* spawning the agent so the
+        // mcp-relay subprocess can route its MCP `initialize` while ACP init is in flight.
+        // session is None until init completes.
         let session_entry = SessionEntry {
-            acp_session_id: None, // filled in after init completes
+            acp_session_id: None,
             mcp_session_id: mcp_session_id.clone(),
             mcp: mcp_session.clone(),
             project_path: project_path.clone(),
             agent_command: agent_cmd.clone(),
-            status: status.clone(),
             available_commands: available_commands.clone(),
-            control_state: control_state.clone(),
-            command_tx: command_tx.clone(),
-            cancel_tx: cancel_tx.clone(),
+            session: None,
         };
         self.topics
             .entry(thread_id)
@@ -423,31 +387,28 @@ impl DaemonHandle {
             })
             .active = Some(session_entry);
 
-        // Create oneshot for receiving the ACP session ID
-        let (result_tx, result_rx) = oneshot::channel();
+        // Create oneshot for receiving the ACP session ID and the Session handle.
+        let (result_tx, result_rx) = oneshot::channel::<Result<(String, Arc<session::Session>)>>();
 
-        // Spawn ACP init + session loop directly in LocalSet.
+        // Spawn ACP init directly in LocalSet.
         tokio::task::spawn_local(spawn_and_run_agent(
             agent_cmd.clone(),
             project_path.clone(),
             event_tx,
-            command_rx,
-            cancel_rx,
-            status.clone(),
-            control_state,
-            self.bot.clone(),
-            ChatId(self.config.chat_id),
+            bot,
+            chat_id,
             thread_id,
             existing_acp_session_id,
             mcp_servers,
             result_tx,
         ));
 
-        // Wait for ACP init to complete, then fill in the real acp_session_id.
-        let acp_session_id = result_rx.await??;
+        // Wait for ACP init to complete, then fill in the real acp_session_id and Session.
+        let (acp_session_id, arc_session) = result_rx.await??;
         if let Some(mut topic) = self.topics.get_mut(&thread_id) {
             if let Some(active) = topic.active.as_mut() {
                 active.acp_session_id = Some(acp_session_id.clone());
+                active.session = Some(arc_session);
             }
         }
 
@@ -489,22 +450,17 @@ impl DaemonHandle {
     }
 }
 
-/// Init phase: spawn agent, initialize/resume ACP session, send result back via oneshot.
-/// Run phase: enter session runtime (continues in same task).
+/// Init phase: spawn agent, initialize/resume ACP session, send Session handle back via oneshot.
 async fn spawn_and_run_agent(
     agent_cmd: String,
     project_path: PathBuf,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
-    command_rx: mpsc::UnboundedReceiver<SessionCommand>,
-    cancel_rx: mpsc::UnboundedReceiver<oneshot::Sender<Result<()>>>,
-    status: Arc<tokio::sync::Mutex<SessionStatus>>,
-    control_state: Arc<tokio::sync::Mutex<session_control::SessionControlState>>,
     bot: Bot,
     chat_id: ChatId,
     thread_id: i32,
     existing_acp_session_id: Option<String>,
     mcp_servers: Vec<acp_sdk::McpServer>,
-    result_tx: oneshot::Sender<Result<String>>,
+    result_tx: oneshot::Sender<Result<(String, Arc<session::Session>)>>,
 ) {
     match init_agent(
         &agent_cmd,
@@ -516,48 +472,25 @@ async fn spawn_and_run_agent(
     .await
     {
         Ok((conn, mut child, bootstrap)) => {
-            // Send the ACP session ID back
             let session_id_str = bootstrap.session_id.to_string();
-            if result_tx.send(Ok(session_id_str.clone())).is_err() {
-                tracing::error!("Failed to send ACP session ID back (receiver dropped)");
-                let _ = child.kill().await;
-                return;
-            }
-
-            {
-                let mut s = status.lock().await;
-                *s = SessionStatus::Idle;
-            }
-
-            // Populate initial control state from bootstrap data
-            {
-                let mut cs = control_state.lock().await;
-                *cs = session_control::build_control_state(
-                    &bootstrap.modes,
-                    &bootstrap.config_options,
-                );
-            }
-
-            // Run the session runtime
             let conn = Arc::new(conn);
-            session::run_session_runtime(
+            let arc_session = session::Session::new(
                 conn,
                 bootstrap.session_id,
+                bootstrap.modes,
+                bootstrap.config_options,
+                event_tx,
                 bot,
                 chat_id,
                 thread_id,
-                command_rx,
-                cancel_rx,
-                event_tx,
-                status,
-                control_state,
-                bootstrap.modes,
-                bootstrap.config_options,
-            )
-            .await;
-
-            // Clean up child process
-            let _ = child.kill().await;
+            );
+            if result_tx.send(Ok((session_id_str, arc_session))).is_err() {
+                tracing::error!("Failed to send Session back (receiver dropped)");
+                let _ = child.kill().await;
+                return;
+            }
+            // Keep child alive until dropped
+            let _ = child.wait().await;
         }
         Err(e) => {
             tracing::error!(
@@ -749,7 +682,10 @@ pub async fn run_daemon(config: Config) -> Result<()> {
                             let thread_id = *entry.key();
                             let topic = entry.value();
                             if let Some(active) = &topic.active {
-                                let status = *active.status.lock().await;
+                                let status = match &active.session {
+                                    Some(s) => s.get_status().await,
+                                    None => SessionStatus::Initializing,
+                                };
                                 if let Some(acp_session_id) = active.acp_session_id.clone() {
                                     sessions.push(crate::types::SessionInfo {
                                         acp_session_id,

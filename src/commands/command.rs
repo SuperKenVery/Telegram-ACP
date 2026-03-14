@@ -3,8 +3,6 @@ use async_trait::async_trait;
 use teloxide::prelude::*;
 use teloxide::types::{MessageId, ThreadId};
 
-use crate::session_control::SessionCommand;
-
 use super::{Command, CommandContext};
 
 pub struct CommandCommand;
@@ -35,13 +33,11 @@ impl Command for CommandCommand {
             format!("/{command_name} {args}")
         };
 
-        let command_tx = ctx
+        let session = ctx
             .daemon
-            .get_session_command_tx_by_thread(thread_id)
+            .get_session_by_thread(thread_id)
             .context("No active session in this topic")?;
-        command_tx
-            .send(SessionCommand::Prompt(prompt))
-            .map_err(|_| anyhow::anyhow!("Session command channel closed"))?;
+        session.send_prompt(prompt);
 
         Ok(())
     }
