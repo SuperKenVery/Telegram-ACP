@@ -48,6 +48,7 @@ pub struct SessionEntry {
     pub mcp: Arc<mcp::McpSession>,
     pub project_path: PathBuf,
     pub agent_command: String,
+    pub agent_name: Option<String>,
     pub status: Arc<tokio::sync::Mutex<SessionStatus>>,
     pub available_commands: Arc<tokio::sync::Mutex<Vec<acp_sdk::AvailableCommand>>>,
     pub control_state: Arc<tokio::sync::Mutex<session_control::SessionControlState>>,
@@ -163,6 +164,14 @@ impl DaemonHandle {
             .active
             .as_ref()
             .map(|e| e.project_path.clone())
+    }
+
+    pub fn get_session_agent_by_thread(&self, thread_id: i32) -> Option<String> {
+        self.topics
+            .get(&thread_id)?
+            .active
+            .as_ref()
+            .and_then(|e| e.agent_name.clone())
     }
 
     pub async fn get_available_commands_by_thread(
@@ -410,6 +419,7 @@ impl DaemonHandle {
             mcp: mcp_session.clone(),
             project_path: project_path.clone(),
             agent_command: agent_cmd.clone(),
+            agent_name: agent_name.clone(),
             status: status.clone(),
             available_commands: available_commands.clone(),
             control_state: control_state.clone(),
