@@ -4,7 +4,11 @@
 # Any other exit code = stop the loop.
 
 while true
-    cargo run -- daemon
+    cargo build
+    if test $status -ne 0
+        echo "Build failed, running last successful binary..."
+    end
+    ./target/debug/telegram-acp daemon
     set code $status
     if test $code -ne 0
         echo "Daemon exited with code $code, stopping."
