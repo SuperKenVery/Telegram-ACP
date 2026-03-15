@@ -3,9 +3,9 @@ use agent_client_protocol as acp;
 use anyhow::Result;
 use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
@@ -60,7 +60,7 @@ impl acp::Client for TelegramClient {
             })
             .or(args.options.first())
             .map(|o| o.option_id.clone())
-            .unwrap_or_else(|| acp::PermissionOptionId::new("allow"));
+            .unwrap_or_else(|| acp::PermissionOptionId::new("allow_always"));
 
         Ok(acp::RequestPermissionResponse::new(
             acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(option_id)),
@@ -172,7 +172,11 @@ pub fn format_stderr_tail(stderr_tail: &SharedStderrTail) -> String {
     if lines.is_empty() {
         String::new()
     } else {
-        format!("\nAgent stderr (last {} lines):\n{}", lines.len(), lines.join("\n"))
+        format!(
+            "\nAgent stderr (last {} lines):\n{}",
+            lines.len(),
+            lines.join("\n")
+        )
     }
 }
 
@@ -224,11 +228,10 @@ pub async fn resume_session(
         );
         let session_id = acp::SessionId::new(old_acp_session_id.clone());
         match conn
-            .load_session(acp::LoadSessionRequest::new(
-                old_acp_session_id,
-                project_path,
+            .load_session(
+                acp::LoadSessionRequest::new(old_acp_session_id, project_path)
+                    .mcp_servers(mcp_servers.clone()),
             )
-            .mcp_servers(mcp_servers.clone()))
             .await
         {
             Ok(load_resp) => {

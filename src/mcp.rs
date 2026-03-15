@@ -1,6 +1,4 @@
 use anyhow::{anyhow, Result};
-use base64::engine::general_purpose::STANDARD as Base64;
-use base64::Engine;
 use futures::channel::mpsc;
 use futures::StreamExt;
 use rmcp::model::{
@@ -64,14 +62,14 @@ impl ServerHandler for McpServer {
         let tools = vec![
             Tool::new(
                 "upload_markdown",
-                "Render Markdown to Telegraph and send link to the user",
+                "Render Markdown file to Telegraph and send link to the user",
                 serde_json::from_value::<rmcp::model::JsonObject>(serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "markdown": { "type": "string" },
+                        "path": { "type": "string", "description": "Absolute or project-relative path to a Markdown file" },
                         "title": { "type": "string" }
                     },
-                    "required": ["markdown"]
+                    "required": ["path"]
                 }))
                 .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None))?,
             ),
@@ -82,10 +80,9 @@ impl ServerHandler for McpServer {
                     "type": "object",
                     "properties": {
                         "path": { "type": "string", "description": "Absolute or project-relative path" },
-                        "content_base64": { "type": "string", "description": "Base64-encoded file content" },
-                        "filename": { "type": "string", "description": "Filename to use for base64 content" },
                         "caption": { "type": "string" }
-                    }
+                    },
+                    "required": ["path"]
                 }))
                 .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None))?,
             ),
@@ -96,10 +93,9 @@ impl ServerHandler for McpServer {
                     "type": "object",
                     "properties": {
                         "path": { "type": "string", "description": "Absolute or project-relative path" },
-                        "content_base64": { "type": "string", "description": "Base64-encoded image data" },
-                        "filename": { "type": "string", "description": "Filename to use for base64 content" },
                         "caption": { "type": "string" }
-                    }
+                    },
+                    "required": ["path"]
                 }))
                 .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None))?,
             ),
@@ -201,23 +197,19 @@ impl McpSession {
 
 #[derive(Deserialize)]
 struct UploadMarkdownArgs {
-    markdown: String,
+    path: String,
     title: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct UploadFileArgs {
-    path: Option<String>,
-    content_base64: Option<String>,
-    filename: Option<String>,
+    path: String,
     caption: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct UploadImageArgs {
-    path: Option<String>,
-    content_base64: Option<String>,
-    filename: Option<String>,
+    path: String,
     caption: Option<String>,
 }
 
@@ -227,8 +219,12 @@ impl McpServer {
         request: CallToolRequestParams,
     ) -> Result<CallToolResult, ErrorData> {
         let args = parse_args::<UploadMarkdownArgs>(request.arguments)?;
+        let resolved = resolve_path(&self.project_path, &args.path);
+        let markdown = tokio::fs::read_to_string(&resolved).await.map_err(|e| {
+            ErrorData::new(ErrorCode::INVALID_PARAMS, e.to_string(), None)
+        })?;
         let title = args.title.unwrap_or_else(|| "Markdown Upload".to_string());
-        let url = telegraph::create_markdown_post(&self.telegraph, &title, &args.markdown)
+        let url = telegraph::create_markdown_post(&self.telegraph, &title, &markdown)
             .await
             .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None))?;
 
@@ -254,12 +250,7 @@ impl McpServer {
         request: CallToolRequestParams,
     ) -> Result<CallToolResult, ErrorData> {
         let args = parse_args::<UploadFileArgs>(request.arguments)?;
-        let (input, filename) = build_input_file(
-            &self.project_path,
-            args.path,
-            args.content_base64,
-            args.filename,
-        )?;
+        let (input, filename) = build_input_file(&self.project_path, &args.path)?;
 
         let thread_id = ThreadId(MessageId(self.thread_id));
         let mut request = self
@@ -283,12 +274,7 @@ impl McpServer {
         request: CallToolRequestParams,
     ) -> Result<CallToolResult, ErrorData> {
         let args = parse_args::<UploadImageArgs>(request.arguments)?;
-        let (input, filename) = build_input_file(
-            &self.project_path,
-            args.path,
-            args.content_base64,
-            args.filename,
-        )?;
+        let (input, filename) = build_input_file(&self.project_path, &args.path)?;
 
         let thread_id = ThreadId(MessageId(self.thread_id));
         let mut request = self
@@ -321,34 +307,15 @@ fn parse_args<T: for<'de> Deserialize<'de>>(
 
 fn build_input_file(
     project_path: &Path,
-    path: Option<String>,
-    content_base64: Option<String>,
-    filename: Option<String>,
+    path: &str,
 ) -> Result<(InputFile, String), ErrorData> {
-    if let Some(path) = path {
-        let resolved = resolve_path(project_path, &path);
-        let display = resolved
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("upload.bin")
-            .to_string();
-        return Ok((InputFile::file(resolved), display));
-    }
-
-    if let Some(content) = content_base64 {
-        let bytes = Base64
-            .decode(content)
-            .map_err(|e| ErrorData::new(ErrorCode::INVALID_PARAMS, e.to_string(), None))?;
-        let name = filename.unwrap_or_else(|| "upload.bin".to_string());
-        let input = InputFile::memory(bytes).file_name(name.clone());
-        return Ok((input, name));
-    }
-
-    Err(ErrorData::new(
-        ErrorCode::INVALID_PARAMS,
-        "Expected 'path' or 'content_base64'".to_string(),
-        None,
-    ))
+    let resolved = resolve_path(project_path, path);
+    let display = resolved
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("upload.bin")
+        .to_string();
+    Ok((InputFile::file(resolved), display))
 }
 
 fn resolve_path(project_path: &Path, path: &str) -> PathBuf {
