@@ -11,6 +11,7 @@ use crate::session_control::SessionControlState;
 mod cancel;
 mod command;
 mod commands;
+mod stop_daemon;
 mod model;
 mod new;
 mod permission;
@@ -22,6 +23,7 @@ mod timer;
 use cancel::CancelCommand;
 use command::CommandCommand;
 use commands::CommandsCommand;
+use stop_daemon::StopDaemonCommand;
 use model::ModelCommand;
 use new::NewCommand;
 use permission::PermissionCommand;
@@ -64,6 +66,7 @@ fn command_registry() -> Vec<Box<dyn Command>> {
         Box::new(CommandCommand),
         Box::new(TimerCommand),
         Box::new(SwitchCommand),
+        Box::new(StopDaemonCommand),
     ]
 }
 
