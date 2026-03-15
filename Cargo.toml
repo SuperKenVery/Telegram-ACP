@@ -28,12 +28,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 similar = "2"
 telegraph-rs = "0.6"
-teloxide = { version = "0.13", features = ["macros"] }
+teloxide = { version = "0.17", features = ["macros"] }
 telegram-markdown-v2 = "0.2"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
-toml = "0.8"
+toml = "1.0"
 dirs = "5"
 rolling-file = "0.2"
 tracing = "0.1"

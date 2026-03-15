@@ -215,7 +215,8 @@ impl DaemonHandle {
             .unwrap_or_else(|| path.clone());
         let topic = self
             .bot
-            .create_forum_topic(ChatId(self.config.chat_id), &topic_name, 0x6FB9F0, "")
+            .create_forum_topic(ChatId(self.config.chat_id), &topic_name)
+            .icon_color(teloxide::types::Rgb::from_u32(0x6FB9F0))
             .await?;
         let thread_id = topic.thread_id.0 .0;
 
