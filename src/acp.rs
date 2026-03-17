@@ -26,14 +26,17 @@ pub struct SessionBootstrap {
 pub struct TelegramClient {
     event_tx: mpsc::UnboundedSender<AgentEvent>,
     /// When true, session_notification is a no-op (suppresses replay during load).
-    pub is_loading: Arc<AtomicBool>,
+    pub session_loading_in_progress: Arc<AtomicBool>,
 }
 
 impl TelegramClient {
-    pub fn new(event_tx: mpsc::UnboundedSender<AgentEvent>, is_loading: Arc<AtomicBool>) -> Self {
+    pub fn new(
+        event_tx: mpsc::UnboundedSender<AgentEvent>,
+        session_loading_in_progress: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             event_tx,
-            is_loading,
+            session_loading_in_progress,
         }
     }
 
@@ -68,7 +71,10 @@ impl acp::Client for TelegramClient {
     }
 
     async fn session_notification(&self, args: acp::SessionNotification) -> acp::Result<()> {
-        if self.is_loading.load(Ordering::Relaxed) {
+        if self
+            .session_loading_in_progress
+            .load(Ordering::Relaxed)
+        {
             return Ok(());
         }
 
@@ -95,7 +101,7 @@ pub fn spawn_agent(
     agent_cmd: &str,
     project_path: &Path,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
-    is_loading: Arc<AtomicBool>,
+    session_loading_in_progress: Arc<AtomicBool>,
 ) -> Result<(
     acp::ClientSideConnection,
     tokio::process::Child,
@@ -120,7 +126,7 @@ pub fn spawn_agent(
 
     let stderr_tail = spawn_stderr_drain(stderr);
 
-    let client = TelegramClient::new(event_tx, is_loading);
+    let client = TelegramClient::new(event_tx, session_loading_in_progress);
 
     let (conn, handle_io) = acp::ClientSideConnection::new(client, stdin, stdout, |fut| {
         tokio::task::spawn_local(fut);

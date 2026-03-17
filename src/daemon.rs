@@ -62,6 +62,8 @@ struct StartSessionRequest {
     agent_cmd: String,
     agent_name: Option<String>,
     existing_acp_session_id: Option<String>,
+    /// Whether the session start request is initiated via `/switch` command in telegram.
+    initiated_via_switch: bool,
     result_tx: oneshot::Sender<Result<String>>,
 }
 
@@ -230,7 +232,14 @@ impl DaemonHandle {
         let thread_id = topic.thread_id.0 .0;
 
         let acp_session_id = match self
-            .enqueue_start_session(thread_id, project_path, agent_cmd, Some(agent_name), None)
+            .enqueue_start_session(
+                thread_id,
+                project_path,
+                agent_cmd,
+                Some(agent_name),
+                None,
+                false,
+            )
             .await
         {
             Ok(session_id) => session_id,
@@ -267,6 +276,8 @@ impl DaemonHandle {
     }
 
     /// Replace the active session in an existing topic with a new one.
+    ///
+    /// Initiated via the `/new` command in telegram, in one thread.
     pub async fn replace_session_in_thread(
         &self,
         thread_id: i32,
@@ -280,8 +291,15 @@ impl DaemonHandle {
             entry.active = None;
         }
 
-        self.enqueue_start_session(thread_id, project_path, agent_cmd, Some(agent_name), None)
-            .await
+        self.enqueue_start_session(
+            thread_id,
+            project_path,
+            agent_cmd,
+            Some(agent_name),
+            None,
+            false,
+        )
+        .await
     }
 
     /// Switch to a previously used session in a topic by resuming it.
@@ -301,6 +319,7 @@ impl DaemonHandle {
             record.agent_command.clone(),
             record.agent_name.clone(),
             Some(record.acp_session_id.clone()),
+            true,
         )
         .await
     }
@@ -314,6 +333,7 @@ impl DaemonHandle {
                 record.agent_command.clone(),
                 record.agent_name.clone(),
                 Some(record.acp_session_id.clone()),
+                false,
             )
             .await?;
 
@@ -343,6 +363,7 @@ impl DaemonHandle {
         agent_cmd: String,
         agent_name: Option<String>,
         existing_acp_session_id: Option<String>,
+        initiated_via_switch: bool,
     ) -> Result<String> {
         let (result_tx, result_rx) = oneshot::channel();
         self.local_start_tx
@@ -352,6 +373,7 @@ impl DaemonHandle {
                 agent_cmd,
                 agent_name,
                 existing_acp_session_id,
+                initiated_via_switch,
                 result_tx,
             })
             .map_err(|_| anyhow::anyhow!("Daemon session starter is unavailable"))?;
@@ -370,6 +392,7 @@ impl DaemonHandle {
         agent_cmd: String,
         agent_name: Option<String>,
         existing_acp_session_id: Option<String>,
+        initiated_via_switch: bool,
     ) -> Result<String> {
         // Channels
         let (command_tx, command_rx) = mpsc::unbounded_channel::<SessionCommand>();
@@ -450,6 +473,7 @@ impl DaemonHandle {
             ChatId(self.config.chat_id),
             thread_id,
             existing_acp_session_id,
+            initiated_via_switch,
             mcp_servers,
             result_tx,
         ));
@@ -514,6 +538,7 @@ async fn spawn_and_run_agent(
     chat_id: ChatId,
     thread_id: i32,
     existing_acp_session_id: Option<String>,
+    initiated_via_switch: bool,
     mcp_servers: Vec<acp_sdk::McpServer>,
     result_tx: oneshot::Sender<Result<String>>,
 ) {
@@ -526,7 +551,22 @@ async fn spawn_and_run_agent(
     )
     .await
     {
-        Ok((conn, mut child, bootstrap)) => {
+        Ok((conn, mut child, bootstrap, session_loading_in_progress)) => {
+            if existing_acp_session_id.is_some() {
+                if initiated_via_switch {
+                    let _ = bot
+                        .send_message(
+                            chat_id,
+                            "Switched to the selected session. Replay hidden; ready for new prompts.",
+                        )
+                        .message_thread_id(teloxide::types::ThreadId(
+                            teloxide::types::MessageId(thread_id),
+                        ))
+                        .await;
+                }
+                session_loading_in_progress.store(false, Ordering::Relaxed);
+            }
+
             // Send the ACP session ID back
             let session_id_str = bootstrap.session_id.to_string();
             if result_tx.send(Ok(session_id_str.clone())).is_err() {
@@ -593,19 +633,25 @@ async fn init_agent(
     agent_client_protocol::ClientSideConnection,
     tokio::process::Child,
     acp::SessionBootstrap,
+    Arc<AtomicBool>,
 )> {
-    let is_loading = Arc::new(AtomicBool::new(existing_acp_session_id.is_some()));
+    let session_loading_in_progress = Arc::new(AtomicBool::new(existing_acp_session_id.is_some()));
     let io_event_tx = event_tx.clone();
 
-    let (conn, child, stderr_tail, handle_io) =
-        acp::spawn_agent(agent_cmd, project_path, event_tx, is_loading.clone()).map_err(|e| {
-            anyhow::anyhow!(
-                "failed to spawn ACP agent process (cmd: {}, project: {}): {:#}",
-                agent_cmd,
-                project_path.display(),
-                e
-            )
-        })?;
+    let (conn, child, stderr_tail, handle_io) = acp::spawn_agent(
+        agent_cmd,
+        project_path,
+        event_tx,
+        session_loading_in_progress.clone(),
+    )
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "failed to spawn ACP agent process (cmd: {}, project: {}): {:#}",
+            agent_cmd,
+            project_path.display(),
+            e
+        )
+    })?;
 
     tokio::task::spawn_local(async move {
         if let Err(e) = handle_io.await {
@@ -628,7 +674,6 @@ async fn init_agent(
                     stderr_tail
                 )
             })?;
-        is_loading.store(false, Ordering::Relaxed);
         session
     } else {
         acp::init_session(&conn, project_path, mcp_servers)
@@ -645,7 +690,7 @@ async fn init_agent(
             })?
     };
 
-    Ok((conn, child, bootstrap))
+    Ok((conn, child, bootstrap, session_loading_in_progress))
 }
 
 fn build_mcp_servers(
@@ -709,6 +754,7 @@ pub async fn run_daemon(config: Config) -> Result<()> {
                         req.agent_cmd,
                         req.agent_name,
                         req.existing_acp_session_id,
+                        req.initiated_via_switch,
                     )
                     .await;
                 let _ = req.result_tx.send(res);
