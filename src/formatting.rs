@@ -16,7 +16,7 @@ pub fn markdown_to_telegram_md_v2(markdown: &str) -> String {
 
 /// Escape text for Telegram MarkdownV2 parse mode.
 pub fn escape_markdown_v2(text: &str) -> String {
-    let mut out = String::with_capacity(text.len()*2);
+    let mut out = String::with_capacity(text.len() * 2);
     for ch in text.chars() {
         match ch {
             '_' | '*' | '[' | ']' | '(' | ')' | '~' | '`' | '>' | '#' | '+' | '-' | '=' | '|'
@@ -204,16 +204,16 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<String> {
 fn format_tool_header(name: &str, kind: acp::ToolKind, status: acp::ToolCallStatus) -> String {
     let status_icon = match status {
         acp::ToolCallStatus::Pending => "⏳",
-        acp::ToolCallStatus::InProgress => "🔄",
+        acp::ToolCallStatus::InProgress => "🚧",
         acp::ToolCallStatus::Completed => "✅",
         acp::ToolCallStatus::Failed => "❌",
-        _ => "⏳",
+        _ => "？",
     };
     let kind_icon = match kind {
-        acp::ToolKind::Read => "📖",
+        acp::ToolKind::Read => "👀",
         acp::ToolKind::Edit => "✏️",
         acp::ToolKind::Delete => "🗑️",
-        acp::ToolKind::Move => "📦",
+        acp::ToolKind::Move => "➡️",
         acp::ToolKind::Search => "🔍",
         acp::ToolKind::Execute => "▶️",
         acp::ToolKind::Think => "🧠",

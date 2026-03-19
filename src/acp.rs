@@ -71,10 +71,7 @@ impl acp::Client for TelegramClient {
     }
 
     async fn session_notification(&self, args: acp::SessionNotification) -> acp::Result<()> {
-        if self
-            .session_loading_in_progress
-            .load(Ordering::Relaxed)
-        {
+        if self.session_loading_in_progress.load(Ordering::Relaxed) {
             return Ok(());
         }
 
