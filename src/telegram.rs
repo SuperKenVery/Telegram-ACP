@@ -49,6 +49,23 @@ async fn handle_message(bot: Bot, msg: Message, daemon: Arc<DaemonHandle>) -> an
     }
 
     if let Some(thread_id) = msg.thread_id {
+        if msg.from().map(|user| user.is_bot).unwrap_or(false) {
+            return Ok(());
+        }
+
+        if let Err(e) = bot
+            .pin_chat_message(msg.chat.id, msg.id)
+            .disable_notification(true)
+            .await
+        {
+            tracing::warn!(
+                chat_id = msg.chat.id.0,
+                thread_id = thread_id.0 .0,
+                message_id = msg.id.0,
+                "Failed to pin user message: {e}"
+            );
+        }
+
         if let Some(text) = msg.text() {
             let prompt = build_prompt_with_quote(&msg, text);
             handle_topic_message(&prompt, thread_id, &daemon).await?;
