@@ -525,7 +525,7 @@ pub async fn run_event_consumer(
                 let name = tool_call.title;
                 let kind = tool_call.kind;
                 let status = tool_call.status;
-                let details = extract_tool_details(&tool_call.content);
+                let details = extract_tool_diff(&tool_call.content);
                 if let Some(sent) = send_html_message(
                     &bot,
                     chat_id,
@@ -557,8 +557,8 @@ pub async fn run_event_consumer(
                 let output = fields
                     .content
                     .as_ref()
-                    .and_then(|contents| extract_tool_output(contents));
-                let details = extract_tool_details(fields.content.as_deref().unwrap_or(&[]));
+                    .and_then(|contents| extract_tool_result_text(contents));
+                let details = extract_tool_diff(fields.content.as_deref().unwrap_or(&[]));
 
                 let resolved_name = if !name.is_empty() {
                     name.clone()
@@ -732,7 +732,7 @@ fn extract_text(content: &acp::ContentBlock) -> String {
     }
 }
 
-fn extract_tool_output(contents: &[acp::ToolCallContent]) -> Option<String> {
+fn extract_tool_result_text(contents: &[acp::ToolCallContent]) -> Option<String> {
     let mut parts = Vec::new();
     for content in contents {
         match content {
@@ -759,7 +759,7 @@ fn extract_tool_output(contents: &[acp::ToolCallContent]) -> Option<String> {
     }
 }
 
-fn extract_tool_details(contents: &[acp::ToolCallContent]) -> Option<String> {
+fn extract_tool_diff(contents: &[acp::ToolCallContent]) -> Option<String> {
     let diffs: Vec<String> = contents
         .iter()
         .filter_map(|content| match content {
