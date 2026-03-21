@@ -33,14 +33,11 @@ impl Command for CommandsCommand {
             return Ok(());
         };
 
-        let text = formatting::format_available_commands(&commands);
+        let text = formatting::format_available_commands_html(&commands);
         ctx.bot
-            .send_message(
-                ctx.msg.chat.id,
-                formatting::markdown_to_telegram_md_v2(&text),
-            )
+            .send_message(ctx.msg.chat.id, text)
             .message_thread_id(ThreadId(MessageId(thread_id)))
-            .parse_mode(ParseMode::MarkdownV2)
+            .parse_mode(ParseMode::Html)
             .await?;
 
         Ok(())

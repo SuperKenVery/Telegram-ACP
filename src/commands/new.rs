@@ -49,14 +49,14 @@ impl Command for NewCommand {
                     .await
                 {
                     Ok(acp_session_id) => {
-                        let reply_markdown = format!("Session `{acp_session_id}` started in this topic.");
+                        let reply = format!(
+                            "Session <code>{}</code> started in this topic.",
+                            formatting::escape_html(&acp_session_id.to_string())
+                        );
                         ctx.bot
-                            .send_message(
-                                ctx.msg.chat.id,
-                                formatting::markdown_to_telegram_md_v2(&reply_markdown),
-                            )
+                            .send_message(ctx.msg.chat.id, reply)
                             .message_thread_id(ThreadId(MessageId(thread_id)))
-                            .parse_mode(ParseMode::MarkdownV2)
+                            .parse_mode(ParseMode::Html)
                             .await?;
                     }
                     Err(e) => {
@@ -87,13 +87,13 @@ impl Command for NewCommand {
                     .await
                 {
                     Ok((acp_session_id, _thread_id)) => {
-                        let reply_markdown = format!("Session `{acp_session_id}` created in a new topic.");
+                        let reply = format!(
+                            "Session <code>{}</code> created in a new topic.",
+                            formatting::escape_html(&acp_session_id.to_string())
+                        );
                         ctx.bot
-                            .send_message(
-                                ctx.msg.chat.id,
-                                formatting::markdown_to_telegram_md_v2(&reply_markdown),
-                            )
-                            .parse_mode(ParseMode::MarkdownV2)
+                            .send_message(ctx.msg.chat.id, reply)
+                            .parse_mode(ParseMode::Html)
                             .await?;
                     }
                     Err(e) => {

@@ -14,6 +14,13 @@ pub fn markdown_to_telegram_md_v2(markdown: &str) -> String {
     }
 }
 
+/// Escape text for Telegram HTML parse mode.
+pub fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 /// Escape text for Telegram MarkdownV2 parse mode.
 pub fn escape_markdown_v2(text: &str) -> String {
     let mut out = String::with_capacity(text.len() * 2);
@@ -46,23 +53,23 @@ pub fn format_thought_message(text: &str) -> String {
     truncate_message(&prefixed, 4096)
 }
 
-/// Format a tool call notification.
+/// Format a tool call notification (HTML).
 pub fn format_tool_call(
     name: &str,
     kind: acp::ToolKind,
     status: acp::ToolCallStatus,
     details: Option<&str>,
 ) -> String {
-    let header = format_tool_header(name, kind, status);
+    let header = format_tool_header_html(name, kind, status);
     match details {
         Some(body) => {
-            format!("{header}\n{}", format_collapsible_block(body, 3800))
+            format!("{header}\n{}", format_collapsible_block_html(body, 3800))
         }
         None => header,
     }
 }
 
-/// Format a tool call result/update.
+/// Format a tool call result/update (HTML).
 pub fn format_tool_result(
     name: &str,
     kind: acp::ToolKind,
@@ -70,30 +77,34 @@ pub fn format_tool_result(
     output: Option<&str>,
     details: Option<&str>,
 ) -> String {
-    let header = format_tool_header(name, kind, status);
+    let header = format_tool_header_html(name, kind, status);
     match details.or(output) {
         Some(body) => {
-            let section = format_collapsible_block(body, 3900);
+            let section = format_collapsible_block_html(body, 3900);
             format!("{header}\n{section}")
         }
         None => header,
     }
 }
 
-/// Format a completion message.
+/// Format a completion message (HTML).
 pub fn format_completion(stop_reason: &str, telegraph_url: Option<&str>) -> String {
-    let mut msg = format!("✓ **Done** ({stop_reason})");
+    let mut msg = format!("✓ <b>Done</b> ({})", escape_html(stop_reason));
     if let Some(url) = telegraph_url {
-        msg.push_str(&format!("\n\n📄 [View changes]({url})"));
+        msg.push_str(&format!(
+            "\n\n📄 <a href=\"{}\">View changes</a>",
+            escape_html(url)
+        ));
     }
     msg
 }
 
-/// Format an error message.
+/// Format an error message (HTML).
 pub fn format_error(error: &str) -> String {
-    format!("❌ **Error:** {error}")
+    format!("❌ <b>Error:</b> {}", escape_html(error))
 }
 
+/// Format a plan message (HTML).
 pub fn format_plan(plan: &acp::Plan) -> String {
     let mut entries: Vec<_> = plan.entries.iter().collect();
     entries.sort_by_key(|entry| match entry.status {
@@ -110,11 +121,11 @@ pub fn format_plan(plan: &acp::Plan) -> String {
         .unwrap_or("Plan");
 
     let mut lines = Vec::with_capacity(entries.len() + 2);
-    lines.push(title.to_string());
+    lines.push(format!("<b>{}</b>", escape_html(title)));
     lines.push(String::new());
 
     for (idx, entry) in entries.iter().enumerate() {
-        let content = &entry.content;
+        let content = escape_html(&entry.content);
         let line = match entry.status {
             acp::PlanEntryStatus::Completed => format!("{}. ✅ {}", idx + 1, content),
             _ => format!("{}. {}", idx + 1, content),
@@ -125,17 +136,19 @@ pub fn format_plan(plan: &acp::Plan) -> String {
     truncate_message(&lines.join("\n"), 4096)
 }
 
+/// Format a completed plan message (HTML).
 pub fn format_plan_completed(plan: &acp::Plan) -> String {
     let mut lines = Vec::with_capacity(plan.entries.len() + 2);
     lines.push("✅ Plan completed".to_string());
     lines.push(String::new());
     for (idx, entry) in plan.entries.iter().enumerate() {
-        lines.push(format!("{}. ✅ {}", idx + 1, entry.content));
+        lines.push(format!("{}. ✅ {}", idx + 1, escape_html(&entry.content)));
     }
     truncate_message(&lines.join("\n"), 4096)
 }
 
-pub fn format_available_commands(commands: &[acp::AvailableCommand]) -> String {
+/// Format available agent slash commands (HTML).
+pub fn format_available_commands_html(commands: &[acp::AvailableCommand]) -> String {
     if commands.is_empty() {
         return "No agent slash commands are advertised for this session.".to_string();
     }
@@ -145,14 +158,50 @@ pub fn format_available_commands(commands: &[acp::AvailableCommand]) -> String {
     lines.push(String::new());
 
     for command in commands {
-        let mut line = format!("• /{}: {}", command.name, command.description);
+        let mut line = format!(
+            "• /<code>{}</code>: {}",
+            escape_html(&command.name),
+            escape_html(&command.description)
+        );
         if let Some(acp::AvailableCommandInput::Unstructured(input)) = &command.input {
-            line.push_str(&format!(" (input: {})", input.hint));
+            line.push_str(&format!(" (input: {})", escape_html(&input.hint)));
         }
         lines.push(line);
     }
 
     truncate_message(&lines.join("\n"), 4096)
+}
+
+fn format_collapsible_block_html(text: &str, max_len: usize) -> String {
+    let truncated = truncate_message(text, max_len);
+    let escaped = escape_html(&truncated);
+    format!("<blockquote expandable><pre><code>{escaped}</code></pre></blockquote>")
+}
+
+fn format_tool_header_html(name: &str, kind: acp::ToolKind, status: acp::ToolCallStatus) -> String {
+    let status_icon = match status {
+        acp::ToolCallStatus::Pending => "⏳",
+        acp::ToolCallStatus::InProgress => "🚧",
+        acp::ToolCallStatus::Completed => "✅",
+        acp::ToolCallStatus::Failed => "❌",
+        _ => "？",
+    };
+    let kind_icon = match kind {
+        acp::ToolKind::Read => "👀",
+        acp::ToolKind::Edit => "✏️",
+        acp::ToolKind::Delete => "🗑️",
+        acp::ToolKind::Move => "➡️",
+        acp::ToolKind::Search => "🔍",
+        acp::ToolKind::Execute => "▶️",
+        acp::ToolKind::Think => "🧠",
+        acp::ToolKind::Fetch => "🌐",
+        acp::ToolKind::Other => "🛠️",
+        _ => "🛠️",
+    };
+    format!(
+        "{status_icon} {kind_icon} <b>Tool:</b> {}",
+        escape_html(name)
+    )
 }
 
 /// Truncate a message to fit within a maximum length.
@@ -167,11 +216,6 @@ fn truncate_message(text: &str, max_len: usize) -> String {
         let cut = text.floor_char_boundary(cut);
         format!("{}{}", &text[..cut], suffix)
     }
-}
-
-fn format_collapsible_block(text: &str, max_len: usize) -> String {
-    let truncated = truncate_message(text, max_len);
-    format!("```\n{}\n```", truncated)
 }
 
 /// Split a long message into multiple chunks that each fit within Telegram's limit.
@@ -201,37 +245,14 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<String> {
     chunks
 }
 
-fn format_tool_header(name: &str, kind: acp::ToolKind, status: acp::ToolCallStatus) -> String {
-    let status_icon = match status {
-        acp::ToolCallStatus::Pending => "⏳",
-        acp::ToolCallStatus::InProgress => "🚧",
-        acp::ToolCallStatus::Completed => "✅",
-        acp::ToolCallStatus::Failed => "❌",
-        _ => "？",
-    };
-    let kind_icon = match kind {
-        acp::ToolKind::Read => "👀",
-        acp::ToolKind::Edit => "✏️",
-        acp::ToolKind::Delete => "🗑️",
-        acp::ToolKind::Move => "➡️",
-        acp::ToolKind::Search => "🔍",
-        acp::ToolKind::Execute => "▶️",
-        acp::ToolKind::Think => "🧠",
-        acp::ToolKind::Fetch => "🌐",
-        acp::ToolKind::Other => "🛠️",
-        _ => "🛠️",
-    };
-    format!("{status_icon} {kind_icon} **Tool:** {name}")
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{format_available_commands, markdown_to_telegram_md_v2};
+    use super::{format_available_commands_html, markdown_to_telegram_md_v2};
     use agent_client_protocol as acp;
 
     #[test]
     fn formats_empty_available_commands() {
-        let text = format_available_commands(&[]);
+        let text = format_available_commands_html(&[]);
         assert!(text.contains("No agent slash commands"));
     }
 
@@ -240,7 +261,7 @@ mod tests {
         let cmd = acp::AvailableCommand::new("search", "Search the codebase").input(
             acp::AvailableCommandInput::Unstructured(acp::UnstructuredCommandInput::new("query")),
         );
-        let text = format_available_commands(&[cmd]);
+        let text = format_available_commands_html(&[cmd]);
         assert!(text.contains("/search"));
         assert!(text.contains("Search the codebase"));
         assert!(text.contains("input: query"));

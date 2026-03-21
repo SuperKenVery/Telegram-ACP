@@ -253,7 +253,7 @@ async fn send_queued_notice(
     lines.push("Agent is currently working.".to_string());
     lines.push("Your message was queued. Pending queue:".to_string());
     for (idx, prompt) in queued_prompts.iter().enumerate() {
-        lines.push(format!("{}. {}", idx + 1, prompt));
+        lines.push(format!("{}. {}", idx + 1, formatting::escape_html(prompt)));
     }
 
     let text = lines.join("\n");
@@ -268,7 +268,8 @@ async fn send_queued_notice(
     while let Some(chunk) = iter.next() {
         let mut request = bot
             .send_message(chat_id, chunk)
-            .message_thread_id(ThreadId(MessageId(thread_id)));
+            .message_thread_id(ThreadId(MessageId(thread_id)))
+            .parse_mode(ParseMode::Html);
         if iter.peek().is_none() {
             request = request.reply_markup(keyboard.clone());
         }
@@ -377,7 +378,7 @@ async fn delete_working_msg(
     }
 }
 
-async fn send_markdown_message(
+async fn send_html_message(
     bot: &Bot,
     chat_id: ChatId,
     thread_id: i32,
@@ -386,16 +387,15 @@ async fn send_markdown_message(
     throttle: &mut OutboundThrottle,
 ) -> Option<Message> {
     throttle.wait_turn().await;
-    let telegram_text = formatting::markdown_to_telegram_md_v2(text);
-    bot.send_message(chat_id, telegram_text)
+    bot.send_message(chat_id, text)
         .message_thread_id(ThreadId(MessageId(thread_id)))
-        .parse_mode(ParseMode::MarkdownV2)
+        .parse_mode(ParseMode::Html)
         .disable_notification(disable_notification)
         .await
         .ok()
 }
 
-async fn send_markdown_chunks(
+async fn send_html_chunks(
     bot: &Bot,
     chat_id: ChatId,
     thread_id: i32,
@@ -403,14 +403,13 @@ async fn send_markdown_chunks(
     disable_notification: bool,
     throttle: &mut OutboundThrottle,
 ) {
-    let telegram_text = formatting::markdown_to_telegram_md_v2(text);
-    let chunks = formatting::split_message(&telegram_text, 4096);
+    let chunks = formatting::split_message(text, 4096);
     for chunk in chunks {
         throttle.wait_turn().await;
         let _ = bot
             .send_message(chat_id, chunk)
             .message_thread_id(ThreadId(MessageId(thread_id)))
-            .parse_mode(ParseMode::MarkdownV2)
+            .parse_mode(ParseMode::Html)
             .disable_notification(disable_notification)
             .await;
     }
@@ -427,7 +426,6 @@ pub async fn run_event_consumer(
     mut event_rx: mpsc::UnboundedReceiver<AgentEvent>,
     available_commands_cache: Arc<Mutex<Vec<acp::AvailableCommand>>>,
 ) {
-    let mut message_count = 0u32;
     let mut draft: Option<DraftState> = None;
     let mut tool_call_messages: HashMap<String, ToolCallMessageState> = HashMap::new();
     let mut plan_message_id: Option<MessageId> = None;
@@ -452,18 +450,7 @@ pub async fn run_event_consumer(
                     draft.as_ref().map(|d| d.kind),
                     Some(DraftKind::AgentThought)
                 ) {
-                    flush_draft(
-                        &bot,
-                        chat_id,
-                        thread_id,
-                        &mut draft,
-                        message_count > 0,
-                        &mut throttle,
-                    )
-                    .await;
-                    if message_count == 0 {
-                        message_count += 1;
-                    }
+                    flush_draft(&bot, chat_id, thread_id, &mut draft, true, &mut throttle).await;
                 }
 
                 let d = draft.get_or_insert_with(|| DraftState {
@@ -473,23 +460,15 @@ pub async fn run_event_consumer(
                 });
                 d.text.push_str(&t);
 
-                let draft_text = formatting::format_text_message(&d.text);
-                if let Err(e) = send_message_draft(
-                    &bot,
-                    chat_id,
-                    thread_id,
-                    d.draft_id,
-                    &draft_text,
-                    &mut throttle,
-                )
-                .await
+                if let Err(e) =
+                    send_message_draft(&bot, chat_id, thread_id, d.draft_id, &d.text, &mut throttle)
+                        .await
                 {
                     tracing::warn!(
                         chat_id = chat_id.0,
                         thread_id = thread_id,
-                        draft_id = d.draft_id,
                         text_len = d.text.len(),
-                        "sendMessageDraft failed: {e}"
+                        "Draft message update failed: {e}"
                     );
                 }
                 continue;
@@ -505,18 +484,7 @@ pub async fn run_event_consumer(
                     draft.as_ref().map(|d| d.kind),
                     Some(DraftKind::AgentMessage)
                 ) {
-                    flush_draft(
-                        &bot,
-                        chat_id,
-                        thread_id,
-                        &mut draft,
-                        message_count > 0,
-                        &mut throttle,
-                    )
-                    .await;
-                    if message_count == 0 {
-                        message_count += 1;
-                    }
+                    flush_draft(&bot, chat_id, thread_id, &mut draft, true, &mut throttle).await;
                 }
 
                 let d = draft.get_or_insert_with(|| DraftState {
@@ -526,40 +494,21 @@ pub async fn run_event_consumer(
                 });
                 d.text.push_str(&t);
 
-                let draft_text = formatting::format_thought_message(&d.text);
-                if let Err(e) = send_message_draft(
-                    &bot,
-                    chat_id,
-                    thread_id,
-                    d.draft_id,
-                    &draft_text,
-                    &mut throttle,
-                )
-                .await
+                if let Err(e) =
+                    send_message_draft(&bot, chat_id, thread_id, d.draft_id, &d.text, &mut throttle)
+                        .await
                 {
                     tracing::warn!(
                         chat_id = chat_id.0,
                         thread_id = thread_id,
-                        draft_id = d.draft_id,
                         text_len = d.text.len(),
-                        "sendMessageDraft failed: {e}"
+                        "Draft message update failed: {e}"
                     );
                 }
                 continue;
             }
             _ => {
-                flush_draft(
-                    &bot,
-                    chat_id,
-                    thread_id,
-                    &mut draft,
-                    message_count > 0,
-                    &mut throttle,
-                )
-                .await;
-                if message_count == 0 {
-                    message_count += 1;
-                }
+                flush_draft(&bot, chat_id, thread_id, &mut draft, true, &mut throttle).await;
             }
         }
 
@@ -569,14 +518,12 @@ pub async fn run_event_consumer(
 
         match event {
             AgentEvent::Working => {
-                let disable_notification = message_count > 0;
-                message_count += 1;
-                if let Some(sent) = send_markdown_message(
+                if let Some(sent) = send_html_message(
                     &bot,
                     chat_id,
                     thread_id,
-                    "⏳ _Working on it..._",
-                    disable_notification,
+                    "⏳ <i>Working on it...</i>",
+                    true,
                     &mut throttle,
                 )
                 .await
@@ -590,14 +537,12 @@ pub async fn run_event_consumer(
                 let kind = tool_call.kind;
                 let status = tool_call.status;
                 let details = extract_tool_details(&tool_call.content);
-                let disable_notification = message_count > 0;
-                message_count += 1;
-                if let Some(sent) = send_markdown_message(
+                if let Some(sent) = send_html_message(
                     &bot,
                     chat_id,
                     thread_id,
                     &formatting::format_tool_call(&name, kind, status, details.as_deref()),
-                    disable_notification,
+                    true,
                     &mut throttle,
                 )
                 .await
@@ -654,11 +599,10 @@ pub async fn run_event_consumer(
                 );
 
                 if let Some(state) = tool_call_messages.get_mut(&id) {
-                    let telegram_text = formatting::markdown_to_telegram_md_v2(&text);
                     throttle.wait_turn().await;
                     if bot
-                        .edit_message_text(chat_id, state.msg_id, telegram_text)
-                        .parse_mode(ParseMode::MarkdownV2)
+                        .edit_message_text(chat_id, state.msg_id, &text)
+                        .parse_mode(ParseMode::Html)
                         .await
                         .is_ok()
                     {
@@ -678,17 +622,9 @@ pub async fn run_event_consumer(
                     }
                 }
 
-                let disable_notification = message_count > 0;
-                message_count += 1;
-                if let Some(sent) = send_markdown_message(
-                    &bot,
-                    chat_id,
-                    thread_id,
-                    &text,
-                    disable_notification,
-                    &mut throttle,
-                )
-                .await
+                if let Some(sent) =
+                    send_html_message(&bot, chat_id, thread_id, &text, true, &mut throttle)
+                        .await
                 {
                     tool_call_messages.insert(
                         id,
@@ -703,14 +639,12 @@ pub async fn run_event_consumer(
                 }
             }
             AgentEvent::Update(acp::SessionUpdate::UsageUpdate(usage)) => {
-                let disable_notification = message_count > 0;
-                message_count += 1;
-                send_markdown_chunks(
+                send_html_chunks(
                     &bot,
                     chat_id,
                     thread_id,
                     &formatting::format_text_message(&format_usage_update(&usage)),
-                    disable_notification,
+                    true,
                     &mut throttle,
                 )
                 .await;
@@ -722,12 +656,12 @@ pub async fn run_event_consumer(
                         let _ = bot.delete_message(chat_id, old_plan_message_id).await;
                     }
 
-                    send_markdown_chunks(
+                    send_html_chunks(
                         &bot,
                         chat_id,
                         thread_id,
                         &formatting::format_plan_completed(&plan),
-                        false,
+                        true,
                         &mut throttle,
                     )
                     .await;
@@ -736,11 +670,10 @@ pub async fn run_event_consumer(
 
                 let formatted = formatting::format_plan(&plan);
                 if let Some(existing_plan_message_id) = plan_message_id {
-                    let telegram_formatted = formatting::markdown_to_telegram_md_v2(&formatted);
                     throttle.wait_turn().await;
                     if bot
-                        .edit_message_text(chat_id, existing_plan_message_id, telegram_formatted)
-                        .parse_mode(ParseMode::MarkdownV2)
+                        .edit_message_text(chat_id, existing_plan_message_id, &formatted)
+                        .parse_mode(ParseMode::Html)
                         .await
                         .is_ok()
                     {
@@ -748,17 +681,9 @@ pub async fn run_event_consumer(
                     }
                 }
 
-                let disable_notification = message_count > 0;
-                message_count += 1;
-                if let Some(sent) = send_markdown_message(
-                    &bot,
-                    chat_id,
-                    thread_id,
-                    &formatted,
-                    disable_notification,
-                    &mut throttle,
-                )
-                .await
+                if let Some(sent) =
+                    send_html_message(&bot, chat_id, thread_id, &formatted, true, &mut throttle)
+                        .await
                 {
                     plan_message_id = Some(sent.id);
                     throttle.wait_turn().await;
@@ -778,7 +703,7 @@ pub async fn run_event_consumer(
             }
             AgentEvent::Update(_) => {}
             AgentEvent::Finished(reason) => {
-                send_markdown_chunks(
+                send_html_chunks(
                     &bot,
                     chat_id,
                     thread_id,
@@ -787,11 +712,10 @@ pub async fn run_event_consumer(
                     &mut throttle,
                 )
                 .await;
-                message_count = 0;
                 tool_call_messages.clear();
             }
             AgentEvent::Error(e) => {
-                send_markdown_chunks(
+                send_html_chunks(
                     &bot,
                     chat_id,
                     thread_id,
@@ -800,7 +724,6 @@ pub async fn run_event_consumer(
                     &mut throttle,
                 )
                 .await;
-                message_count = 0;
                 tool_call_messages.clear();
             }
         }
