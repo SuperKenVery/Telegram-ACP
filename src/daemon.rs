@@ -552,17 +552,14 @@ async fn spawn_and_run_agent(
     .await
     {
         Ok((conn, mut child, bootstrap, session_loading_in_progress)) => {
-            if existing_acp_session_id.is_some() {
-                let msg = if initiated_via_switch {
-                    "Switched to the selected session. Replay hidden; ready for new prompts."
-                } else {
-                    "Session restored. Replay hidden; ready for new prompts."
-                };
+            if existing_acp_session_id.is_some() && initiated_via_switch {
+                // On daemon restart, we send nothing
+                let msg = "Switched to the selected session. Replay hidden; ready for new prompts.";
                 let _ = bot
                     .send_message(chat_id, msg)
-                    .message_thread_id(teloxide::types::ThreadId(
-                        teloxide::types::MessageId(thread_id),
-                    ))
+                    .message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(
+                        thread_id,
+                    )))
                     .await;
                 session_loading_in_progress.store(false, Ordering::Relaxed);
             }
