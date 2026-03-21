@@ -817,12 +817,9 @@ fn format_usage_update(usage: &acp::UsageUpdate) -> String {
 }
 
 fn rand_draft_id() -> i64 {
-    use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hasher};
-    let s = RandomState::new();
-    let mut h = s.build_hasher();
-    h.write_u8(0);
-    h.finish() as i64
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static COUNTER: AtomicI64 = AtomicI64::new(1);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 fn is_plan_completed(plan: &acp::Plan) -> bool {
