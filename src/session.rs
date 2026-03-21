@@ -304,10 +304,14 @@ async fn send_message_draft(
     let url = format!("https://api.telegram.org/bot{token}/sendMessageDraft");
     let telegram_text = formatting::markdown_to_telegram_md_v2(text);
 
+    // Telegram draft messages have the same 4096-char limit as regular messages.
+    // Rather than chunking (complex for drafts), we truncate with an indicator.
+    let draft_text = formatting::truncate_message(&telegram_text, 4096);
+
     let mut body = serde_json::json!({
         "chat_id": chat_id.0,
         "draft_id": draft_id,
-        "text": telegram_text,
+        "text": draft_text,
         "parse_mode": "MarkdownV2",
     });
 

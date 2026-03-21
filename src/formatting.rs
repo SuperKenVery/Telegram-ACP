@@ -206,7 +206,7 @@ fn format_tool_header_html(name: &str, kind: acp::ToolKind, status: acp::ToolCal
 
 /// Truncate a message to fit within a maximum length.
 /// If truncated, appends "…[truncated]".
-fn truncate_message(text: &str, max_len: usize) -> String {
+pub fn truncate_message(text: &str, max_len: usize) -> String {
     if text.len() <= max_len {
         text.to_string()
     } else {
