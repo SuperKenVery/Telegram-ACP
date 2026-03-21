@@ -415,6 +415,40 @@ async fn send_html_chunks(
     }
 }
 
+/// Append `text` to the current draft (creating one if needed), flushing first if the
+/// draft kind has changed. Sends a streaming draft update after accumulating.
+async fn accumulate_chunk(
+    bot: &Bot,
+    chat_id: ChatId,
+    thread_id: i32,
+    text: &str,
+    kind: DraftKind,
+    draft: &mut Option<DraftState>,
+    throttle: &mut OutboundThrottle,
+) {
+    let opposite = match kind {
+        DraftKind::AgentMessage => DraftKind::AgentThought,
+        DraftKind::AgentThought => DraftKind::AgentMessage,
+    };
+    if matches!(draft.as_ref().map(|d| d.kind), Some(k) if k == opposite) {
+        flush_draft(bot, chat_id, thread_id, draft, true, throttle).await;
+    }
+    let d = draft.get_or_insert_with(|| DraftState {
+        draft_id: rand_draft_id(),
+        text: String::new(),
+        kind,
+    });
+    d.text.push_str(text);
+    if let Err(e) = send_message_draft(bot, chat_id, thread_id, d.draft_id, &d.text, throttle).await {
+        tracing::warn!(
+            chat_id = chat_id.0,
+            thread_id = thread_id,
+            text_len = d.text.len(),
+            "Draft message update failed: {e}"
+        );
+    }
+}
+
 /// Consume AgentEvents and send them as Telegram messages in the forum topic.
 /// Consecutive text chunks are streamed via `sendMessageDraft` and finalized
 /// with `sendMessage` when a non-text event arrives or the stream ends.
@@ -441,69 +475,25 @@ pub async fn run_event_consumer(
             }
             AgentEvent::Update(acp::SessionUpdate::AgentMessageChunk(chunk)) => {
                 let t = extract_text(&chunk.content);
-                if t.is_empty() {
-                    continue;
-                }
-                delete_working_msg(&bot, chat_id, &mut working_msg_id, &mut throttle).await;
-
-                if matches!(
-                    draft.as_ref().map(|d| d.kind),
-                    Some(DraftKind::AgentThought)
-                ) {
-                    flush_draft(&bot, chat_id, thread_id, &mut draft, true, &mut throttle).await;
-                }
-
-                let d = draft.get_or_insert_with(|| DraftState {
-                    draft_id: rand_draft_id(),
-                    text: String::new(),
-                    kind: DraftKind::AgentMessage,
-                });
-                d.text.push_str(&t);
-
-                if let Err(e) =
-                    send_message_draft(&bot, chat_id, thread_id, d.draft_id, &d.text, &mut throttle)
-                        .await
-                {
-                    tracing::warn!(
-                        chat_id = chat_id.0,
-                        thread_id = thread_id,
-                        text_len = d.text.len(),
-                        "Draft message update failed: {e}"
-                    );
+                if !t.is_empty() {
+                    delete_working_msg(&bot, chat_id, &mut working_msg_id, &mut throttle).await;
+                    accumulate_chunk(
+                        &bot, chat_id, thread_id, &t, DraftKind::AgentMessage,
+                        &mut draft, &mut throttle,
+                    )
+                    .await;
                 }
                 continue;
             }
             AgentEvent::Update(acp::SessionUpdate::AgentThoughtChunk(chunk)) => {
                 let t = extract_text(&chunk.content);
-                if t.is_empty() {
-                    continue;
-                }
-                delete_working_msg(&bot, chat_id, &mut working_msg_id, &mut throttle).await;
-
-                if matches!(
-                    draft.as_ref().map(|d| d.kind),
-                    Some(DraftKind::AgentMessage)
-                ) {
-                    flush_draft(&bot, chat_id, thread_id, &mut draft, true, &mut throttle).await;
-                }
-
-                let d = draft.get_or_insert_with(|| DraftState {
-                    draft_id: rand_draft_id(),
-                    text: String::new(),
-                    kind: DraftKind::AgentThought,
-                });
-                d.text.push_str(&t);
-
-                if let Err(e) =
-                    send_message_draft(&bot, chat_id, thread_id, d.draft_id, &d.text, &mut throttle)
-                        .await
-                {
-                    tracing::warn!(
-                        chat_id = chat_id.0,
-                        thread_id = thread_id,
-                        text_len = d.text.len(),
-                        "Draft message update failed: {e}"
-                    );
+                if !t.is_empty() {
+                    delete_working_msg(&bot, chat_id, &mut working_msg_id, &mut throttle).await;
+                    accumulate_chunk(
+                        &bot, chat_id, thread_id, &t, DraftKind::AgentThought,
+                        &mut draft, &mut throttle,
+                    )
+                    .await;
                 }
                 continue;
             }
