@@ -43,14 +43,14 @@ pub fn format_text_message(text: &str) -> String {
     truncate_message(text, 4096)
 }
 
-/// Format a thought/reasoning message for Telegram.
+/// Format a thought/reasoning message for Telegram (HTML).
 pub fn format_thought_message(text: &str) -> String {
-    let prefixed = if text.trim().is_empty() {
-        "💭 _Thought_".to_string()
+    let header = "💭 <b>Thought</b>";
+    if text.trim().is_empty() {
+        header.to_string()
     } else {
-        format!("💭 _Thought_\n\n{}", text)
-    };
-    truncate_message(&prefixed, 4096)
+        format!("{header}\n{}", format_collapsible_block_html(text, 3900))
+    }
 }
 
 /// Format a tool call notification (HTML).
@@ -175,7 +175,7 @@ pub fn format_available_commands_html(commands: &[acp::AvailableCommand]) -> Str
 fn format_collapsible_block_html(text: &str, max_len: usize) -> String {
     let truncated = truncate_message(text, max_len);
     let escaped = escape_html(&truncated);
-    format!("<blockquote expandable><pre><code>{escaped}</code></pre></blockquote>")
+    format!("<blockquote expandable>{escaped}</blockquote>")
 }
 
 fn format_tool_header_html(name: &str, kind: acp::ToolKind, status: acp::ToolCallStatus) -> String {
