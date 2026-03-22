@@ -342,18 +342,25 @@ async fn flush_draft(
         if d.text.is_empty() {
             return;
         }
-        let formatted = match d.kind {
-            DraftKind::AgentMessage => formatting::format_text_message(&d.text),
-            DraftKind::AgentThought => formatting::format_thought_message(&d.text),
+        let (finalized_text, parse_mode) = match d.kind {
+            DraftKind::AgentMessage => {
+                let formatted = formatting::format_text_message(&d.text);
+                (
+                    formatting::markdown_to_telegram_md_v2(&formatted),
+                    ParseMode::MarkdownV2,
+                )
+            }
+            DraftKind::AgentThought => {
+                (formatting::format_thought_message(&d.text), ParseMode::Html)
+            }
         };
-        let finalized_text = formatting::markdown_to_telegram_md_v2(&formatted);
         let chunks = formatting::split_message(&finalized_text, 4096);
         for chunk in chunks {
             throttle.wait_turn().await;
             let send_result = bot
                 .send_message(chat_id, chunk.clone())
                 .message_thread_id(ThreadId(MessageId(thread_id)))
-                .parse_mode(ParseMode::MarkdownV2)
+                .parse_mode(parse_mode)
                 .disable_notification(disable_notification)
                 .await;
 
@@ -593,26 +600,23 @@ pub async fn run_event_consumer(
 
                 if let Some(state) = tool_call_messages.get_mut(&id) {
                     throttle.wait_turn().await;
-                    if bot
+                    let _ = bot
                         .edit_message_text(chat_id, state.msg_id, &text)
                         .parse_mode(ParseMode::Html)
-                        .await
-                        .is_ok()
-                    {
-                        if !name.is_empty() {
-                            state.name = name;
-                        }
-                        if let Some(k) = kind {
-                            state.kind = k;
-                        }
-                        if let Some(s) = status {
-                            state.status = s;
-                        }
-                        if details.is_some() {
-                            state.details = details;
-                        }
-                        continue;
+                        .await;
+                    if !name.is_empty() {
+                        state.name = name;
                     }
+                    if let Some(k) = kind {
+                        state.kind = k;
+                    }
+                    if let Some(s) = status {
+                        state.status = s;
+                    }
+                    if details.is_some() {
+                        state.details = details;
+                    }
+                    continue;
                 }
 
                 if let Some(sent) =
