@@ -1,74 +1,23 @@
 use acp::Agent;
 use agent_client_protocol as acp;
-use similar::TextDiff;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId, ParseMode, ThreadId};
 use tokio::sync::{mpsc, oneshot, Mutex};
-use tokio::time::{sleep_until, Duration, Instant};
 
 use crate::formatting;
+use crate::handlers::draft::DraftHandler;
+use crate::handlers::plan::PlanHandler;
+use crate::handlers::tool_call::ToolCallHandler;
+use crate::handlers::working::WorkingHandler;
+use crate::handlers::{EventContext, EventHandler};
 use crate::session_control::{build_control_state, SessionCommand};
 use crate::types::{AgentEvent, SessionStatus};
 
 enum PromptOutcome {
     Finished(String),
     Error(String),
-}
-
-struct OutboundThrottle {
-    min_interval: Duration,
-    next_allowed_at: Instant,
-}
-
-impl OutboundThrottle {
-    fn per_second(count: u64) -> Self {
-        let min_interval = Duration::from_secs_f64(1.0 / count as f64);
-        Self {
-            min_interval,
-            next_allowed_at: Instant::now(),
-        }
-    }
-
-    async fn wait_turn(&mut self) {
-        let now = Instant::now();
-        if self.next_allowed_at > now {
-            sleep_until(self.next_allowed_at).await;
-        }
-        self.next_allowed_at = Instant::now() + self.min_interval;
-    }
-
-    fn try_turn(&mut self) -> bool {
-        let now = Instant::now();
-        if self.next_allowed_at > now {
-            return false;
-        }
-        self.next_allowed_at = now + self.min_interval;
-        true
-    }
-}
-
-/// State for an in-progress text draft being streamed.
-struct DraftState {
-    draft_id: i64,
-    text: String,
-    kind: DraftKind,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DraftKind {
-    AgentMessage,
-    AgentThought,
-}
-
-/// Tracks which Telegram message corresponds to a tool call id.
-struct ToolCallMessageState {
-    msg_id: MessageId,
-    name: String,
-    kind: acp::ToolKind,
-    status: acp::ToolCallStatus,
-    details: Option<String>,
 }
 
 pub async fn run_session_runtime(
@@ -284,186 +233,8 @@ async fn send_queued_notice(
     }
 }
 
-/// Send a message draft (streaming partial text) via the raw Telegram Bot API.
-/// Uses `sendMessageDraft` (Bot API 9.3+). Returns Ok(()) on success.
-async fn send_message_draft(
-    bot: &Bot,
-    chat_id: ChatId,
-    thread_id: i32,
-    draft_id: i64,
-    text: &str,
-    throttle: &mut OutboundThrottle,
-) -> anyhow::Result<()> {
-    // Coalesce frequent streaming updates: if we are inside the 1s window,
-    // skip this send and let the next allowed update publish full draft text.
-    if !throttle.try_turn() {
-        return Ok(());
-    }
-    let client = bot.client();
-    let token = bot.token();
-    let url = format!("https://api.telegram.org/bot{token}/sendMessageDraft");
-    let telegram_text = formatting::markdown_to_telegram_md_v2(text);
-
-    // Telegram draft messages have the same 4096-char limit as regular messages.
-    // Rather than chunking (complex for drafts), we truncate with an indicator.
-    let draft_text = formatting::truncate_message(&telegram_text, 4096);
-
-    let mut body = serde_json::json!({
-        "chat_id": chat_id.0,
-        "draft_id": draft_id,
-        "text": draft_text,
-        "parse_mode": "MarkdownV2",
-    });
-
-    if thread_id != 0 {
-        body["message_thread_id"] = serde_json::json!(thread_id);
-    }
-
-    let resp = client.post(&url).json(&body).send().await?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body_text = resp.text().await.unwrap_or_default();
-        anyhow::bail!("sendMessageDraft failed ({status}): {body_text}");
-    }
-    Ok(())
-}
-
-/// Flush the accumulated draft text as a finalized `sendMessage`.
-/// Clears the draft state. Returns Ok(()) even if sending fails (logs error).
-async fn flush_draft(
-    bot: &Bot,
-    chat_id: ChatId,
-    thread_id: i32,
-    draft: &mut Option<DraftState>,
-    disable_notification: bool,
-    throttle: &mut OutboundThrottle,
-) {
-    if let Some(d) = draft.take() {
-        if d.text.is_empty() {
-            return;
-        }
-        let (finalized_text, parse_mode) = match d.kind {
-            DraftKind::AgentMessage => {
-                let formatted = formatting::format_text_message(&d.text);
-                (
-                    formatting::markdown_to_telegram_md_v2(&formatted),
-                    ParseMode::MarkdownV2,
-                )
-            }
-            DraftKind::AgentThought => {
-                (formatting::format_thought_message(&d.text), ParseMode::Html)
-            }
-        };
-        let chunks = formatting::split_message(&finalized_text, 4096);
-        for chunk in chunks {
-            throttle.wait_turn().await;
-            let send_result = bot
-                .send_message(chat_id, chunk.clone())
-                .message_thread_id(ThreadId(MessageId(thread_id)))
-                .parse_mode(parse_mode)
-                .disable_notification(disable_notification)
-                .await;
-
-            if let Err(e) = send_result {
-                tracing::warn!(
-                    chat_id = chat_id.0,
-                    thread_id = thread_id,
-                    chunk_len = chunk.len(),
-                    "Failed to send finalized draft chunk as MarkdownV2: {e}"
-                );
-                break;
-            }
-        }
-    }
-}
-
-async fn delete_working_msg(
-    bot: &Bot,
-    chat_id: ChatId,
-    working_msg_id: &mut Option<teloxide::types::MessageId>,
-    throttle: &mut OutboundThrottle,
-) {
-    if let Some(msg_id) = working_msg_id.take() {
-        throttle.wait_turn().await;
-        let _ = bot.delete_message(chat_id, msg_id).await;
-    }
-}
-
-async fn send_html_message(
-    bot: &Bot,
-    chat_id: ChatId,
-    thread_id: i32,
-    text: &str,
-    disable_notification: bool,
-    throttle: &mut OutboundThrottle,
-) -> Option<Message> {
-    throttle.wait_turn().await;
-    bot.send_message(chat_id, text)
-        .message_thread_id(ThreadId(MessageId(thread_id)))
-        .parse_mode(ParseMode::Html)
-        .disable_notification(disable_notification)
-        .await
-        .ok()
-}
-
-async fn send_html_chunks(
-    bot: &Bot,
-    chat_id: ChatId,
-    thread_id: i32,
-    text: &str,
-    disable_notification: bool,
-    throttle: &mut OutboundThrottle,
-) {
-    let chunks = formatting::split_message(text, 4096);
-    for chunk in chunks {
-        throttle.wait_turn().await;
-        let _ = bot
-            .send_message(chat_id, chunk)
-            .message_thread_id(ThreadId(MessageId(thread_id)))
-            .parse_mode(ParseMode::Html)
-            .disable_notification(disable_notification)
-            .await;
-    }
-}
-
-/// Append `text` to the current draft (creating one if needed), flushing first if the
-/// draft kind has changed. Sends a streaming draft update after accumulating.
-async fn accumulate_chunk(
-    bot: &Bot,
-    chat_id: ChatId,
-    thread_id: i32,
-    text: &str,
-    kind: DraftKind,
-    draft: &mut Option<DraftState>,
-    throttle: &mut OutboundThrottle,
-) {
-    let opposite = match kind {
-        DraftKind::AgentMessage => DraftKind::AgentThought,
-        DraftKind::AgentThought => DraftKind::AgentMessage,
-    };
-    if matches!(draft.as_ref().map(|d| d.kind), Some(k) if k == opposite) {
-        flush_draft(bot, chat_id, thread_id, draft, true, throttle).await;
-    }
-    let d = draft.get_or_insert_with(|| DraftState {
-        draft_id: rand_draft_id(),
-        text: String::new(),
-        kind,
-    });
-    d.text.push_str(text);
-    if let Err(e) = send_message_draft(bot, chat_id, thread_id, d.draft_id, &d.text, throttle).await {
-        tracing::warn!(
-            chat_id = chat_id.0,
-            thread_id = thread_id,
-            text_len = d.text.len(),
-            "Draft message update failed: {e}"
-        );
-    }
-}
-
 /// Consume AgentEvents and send them as Telegram messages in the forum topic.
-/// Consecutive text chunks are streamed via `sendMessageDraft` and finalized
-/// with `sendMessage` when a non-text event arrives or the stream ends.
-/// Runs until the event channel is closed (i.e., the session ends).
+/// Dispatches events to specialized handlers, each tracking their own state.
 pub async fn run_event_consumer(
     bot: Bot,
     chat_id: ChatId,
@@ -471,338 +242,69 @@ pub async fn run_event_consumer(
     mut event_rx: mpsc::UnboundedReceiver<AgentEvent>,
     available_commands_cache: Arc<Mutex<Vec<acp::AvailableCommand>>>,
 ) {
-    let mut draft: Option<DraftState> = None;
-    let mut tool_call_messages: HashMap<String, ToolCallMessageState> = HashMap::new();
-    let mut plan_message_id: Option<MessageId> = None;
-    let mut throttle = OutboundThrottle::per_second(1);
-    let mut working_msg_id: Option<teloxide::types::MessageId> = None;
+    let mut ctx = EventContext::new(bot, chat_id, thread_id);
+    let mut draft = DraftHandler::new();
+    let mut working = WorkingHandler::new();
+    let mut tool_call = ToolCallHandler::new();
+    let mut plan = PlanHandler::new();
 
     while let Some(event) = event_rx.recv().await {
-        match &event {
-            AgentEvent::Update(acp::SessionUpdate::AvailableCommandsUpdate(update)) => {
-                *available_commands_cache.lock().await = update.available_commands.clone();
-                continue;
-            }
-            AgentEvent::Update(acp::SessionUpdate::AgentMessageChunk(chunk)) => {
-                let t = extract_text(&chunk.content);
-                if !t.is_empty() {
-                    delete_working_msg(&bot, chat_id, &mut working_msg_id, &mut throttle).await;
-                    accumulate_chunk(
-                        &bot, chat_id, thread_id, &t, DraftKind::AgentMessage,
-                        &mut draft, &mut throttle,
-                    )
-                    .await;
-                }
-                continue;
-            }
-            AgentEvent::Update(acp::SessionUpdate::AgentThoughtChunk(chunk)) => {
-                let t = extract_text(&chunk.content);
-                if !t.is_empty() {
-                    delete_working_msg(&bot, chat_id, &mut working_msg_id, &mut throttle).await;
-                    accumulate_chunk(
-                        &bot, chat_id, thread_id, &t, DraftKind::AgentThought,
-                        &mut draft, &mut throttle,
-                    )
-                    .await;
-                }
-                continue;
-            }
-            _ => {
-                flush_draft(&bot, chat_id, thread_id, &mut draft, true, &mut throttle).await;
-            }
+        // AvailableCommandsUpdate: just update cache
+        if let AgentEvent::Update(acp::SessionUpdate::AvailableCommandsUpdate(update)) = &event {
+            *available_commands_cache.lock().await = update.available_commands.clone();
+            continue;
         }
 
+        // Text chunks → draft handler (streaming)
+        if draft.handle(&event, &mut ctx).await {
+            working.dismiss(&mut ctx).await;
+            continue;
+        }
+
+        // Non-text event: flush accumulated draft
+        draft.flush(&mut ctx).await;
+
+        // Dismiss working indicator for non-Working events
         if !matches!(event, AgentEvent::Working) {
-            delete_working_msg(&bot, chat_id, &mut working_msg_id, &mut throttle).await;
+            working.dismiss(&mut ctx).await;
         }
 
+        // Dispatch to handlers
+        if working.handle(&event, &mut ctx).await {
+            continue;
+        }
+        if tool_call.handle(&event, &mut ctx).await {
+            continue;
+        }
+        if plan.handle(&event, &mut ctx).await {
+            continue;
+        }
+
+        // Inline: simple events
         match event {
-            AgentEvent::Working => {
-                if let Some(sent) = send_html_message(
-                    &bot,
-                    chat_id,
-                    thread_id,
-                    "⏳ <i>Working on it...</i>",
-                    true,
-                    &mut throttle,
-                )
-                .await
-                {
-                    working_msg_id = Some(sent.id);
-                }
-            }
-            AgentEvent::Update(acp::SessionUpdate::ToolCall(tool_call)) => {
-                let id = tool_call.tool_call_id.to_string();
-                let name = tool_call.title;
-                let kind = tool_call.kind;
-                let status = tool_call.status;
-                let details = extract_tool_diff(&tool_call.content);
-                if let Some(sent) = send_html_message(
-                    &bot,
-                    chat_id,
-                    thread_id,
-                    &formatting::format_tool_call(&name, kind, status, details.as_deref()),
-                    true,
-                    &mut throttle,
-                )
-                .await
-                {
-                    tool_call_messages.insert(
-                        id,
-                        ToolCallMessageState {
-                            msg_id: sent.id,
-                            name,
-                            kind,
-                            status,
-                            details,
-                        },
-                    );
-                }
-            }
-            AgentEvent::Update(acp::SessionUpdate::ToolCallUpdate(update)) => {
-                let id = update.tool_call_id.to_string();
-                let fields = update.fields;
-                let name = fields.title.unwrap_or_default();
-                let kind = fields.kind;
-                let status = fields.status;
-                let output = fields
-                    .content
-                    .as_ref()
-                    .and_then(|contents| extract_tool_result_text(contents));
-                let details = extract_tool_diff(fields.content.as_deref().unwrap_or(&[]));
-
-                let resolved_name = if !name.is_empty() {
-                    name.clone()
-                } else {
-                    tool_call_messages
-                        .get(&id)
-                        .map(|s| s.name.clone())
-                        .unwrap_or_default()
-                };
-                let resolved_details = if details.is_some() {
-                    details.clone()
-                } else {
-                    tool_call_messages.get(&id).and_then(|s| s.details.clone())
-                };
-                let resolved_kind = kind
-                    .or_else(|| tool_call_messages.get(&id).map(|s| s.kind))
-                    .unwrap_or(acp::ToolKind::Other);
-                let resolved_status = status
-                    .or_else(|| tool_call_messages.get(&id).map(|s| s.status))
-                    .unwrap_or(acp::ToolCallStatus::Pending);
-                let text = formatting::format_tool_result(
-                    &resolved_name,
-                    resolved_kind,
-                    resolved_status,
-                    output.as_deref(),
-                    resolved_details.as_deref(),
-                );
-
-                if let Some(state) = tool_call_messages.get_mut(&id) {
-                    throttle.wait_turn().await;
-                    let _ = bot
-                        .edit_message_text(chat_id, state.msg_id, &text)
-                        .parse_mode(ParseMode::Html)
-                        .await;
-                    if !name.is_empty() {
-                        state.name = name;
-                    }
-                    if let Some(k) = kind {
-                        state.kind = k;
-                    }
-                    if let Some(s) = status {
-                        state.status = s;
-                    }
-                    if details.is_some() {
-                        state.details = details;
-                    }
-                    continue;
-                }
-
-                if let Some(sent) =
-                    send_html_message(&bot, chat_id, thread_id, &text, true, &mut throttle)
-                        .await
-                {
-                    tool_call_messages.insert(
-                        id,
-                        ToolCallMessageState {
-                            msg_id: sent.id,
-                            name: resolved_name,
-                            kind: resolved_kind,
-                            status: resolved_status,
-                            details: resolved_details,
-                        },
-                    );
-                }
-            }
             AgentEvent::Update(acp::SessionUpdate::UsageUpdate(usage)) => {
-                send_html_chunks(
-                    &bot,
-                    chat_id,
-                    thread_id,
-                    &formatting::format_text_message(&format_usage_update(&usage)),
-                    true,
-                    &mut throttle,
-                )
-                .await;
+                let text = formatting::format_text_message(&format_usage_update(&usage));
+                ctx.send_html_chunks(&text, true).await;
             }
-            AgentEvent::Update(acp::SessionUpdate::Plan(plan)) => {
-                if is_plan_completed(&plan) {
-                    if let Some(old_plan_message_id) = plan_message_id.take() {
-                        throttle.wait_turn().await;
-                        let _ = bot.delete_message(chat_id, old_plan_message_id).await;
-                    }
-
-                    send_html_chunks(
-                        &bot,
-                        chat_id,
-                        thread_id,
-                        &formatting::format_plan_completed(&plan),
-                        true,
-                        &mut throttle,
-                    )
-                    .await;
-                    continue;
-                }
-
-                let formatted = formatting::format_plan(&plan);
-                if let Some(existing_plan_message_id) = plan_message_id {
-                    throttle.wait_turn().await;
-                    if bot
-                        .edit_message_text(chat_id, existing_plan_message_id, &formatted)
-                        .parse_mode(ParseMode::Html)
-                        .await
-                        .is_ok()
-                    {
-                        continue;
-                    }
-                }
-
-                if let Some(sent) =
-                    send_html_message(&bot, chat_id, thread_id, &formatted, true, &mut throttle)
-                        .await
-                {
-                    plan_message_id = Some(sent.id);
-                    throttle.wait_turn().await;
-                    if let Err(e) = bot
-                        .pin_chat_message(chat_id, sent.id)
-                        .disable_notification(true)
-                        .await
-                    {
-                        tracing::warn!(
-                            chat_id = chat_id.0,
-                            thread_id = thread_id,
-                            message_id = sent.id.0,
-                            "Failed to pin plan message: {e}"
-                        );
-                    }
-                }
-            }
-            AgentEvent::Update(_) => {}
             AgentEvent::Finished(reason) => {
-                send_html_chunks(
-                    &bot,
-                    chat_id,
-                    thread_id,
+                ctx.send_html_chunks(
                     &formatting::format_completion(&reason, None),
                     false,
-                    &mut throttle,
                 )
                 .await;
-                tool_call_messages.clear();
+                tool_call.reset(&mut ctx).await;
             }
             AgentEvent::Error(e) => {
-                send_html_chunks(
-                    &bot,
-                    chat_id,
-                    thread_id,
-                    &formatting::format_error(&e),
-                    false,
-                    &mut throttle,
-                )
-                .await;
-                tool_call_messages.clear();
-            }
-        }
-    }
-
-    flush_draft(&bot, chat_id, thread_id, &mut draft, true, &mut throttle).await;
-    throttle.wait_turn().await;
-    let _ = bot
-        .close_forum_topic(chat_id, ThreadId(MessageId(thread_id)))
-        .await;
-}
-
-fn extract_text(content: &acp::ContentBlock) -> String {
-    match content {
-        acp::ContentBlock::Text(tc) => tc.text.clone(),
-        _ => String::new(),
-    }
-}
-
-fn extract_tool_result_text(contents: &[acp::ToolCallContent]) -> Option<String> {
-    let mut parts = Vec::new();
-    for content in contents {
-        match content {
-            acp::ToolCallContent::Content(content) => {
-                let text = extract_text(&content.content);
-                if !text.trim().is_empty() {
-                    parts.push(text);
-                }
-            }
-            acp::ToolCallContent::Diff(diff) => {
-                parts.push(format_unified_diff(
-                    Some(diff.path.display().to_string()),
-                    diff.old_text.as_deref(),
-                    &diff.new_text,
-                ));
+                ctx.send_html_chunks(&formatting::format_error(&e), false)
+                    .await;
+                tool_call.reset(&mut ctx).await;
             }
             _ => {}
         }
     }
-    if parts.is_empty() {
-        None
-    } else {
-        Some(parts.join("\n\n"))
-    }
-}
 
-fn extract_tool_diff(contents: &[acp::ToolCallContent]) -> Option<String> {
-    let diffs: Vec<String> = contents
-        .iter()
-        .filter_map(|content| match content {
-            acp::ToolCallContent::Diff(diff) => Some(format_unified_diff(
-                Some(diff.path.display().to_string()),
-                diff.old_text.as_deref(),
-                &diff.new_text,
-            )),
-            _ => None,
-        })
-        .collect();
-
-    if diffs.is_empty() {
-        None
-    } else {
-        Some(diffs.join("\n\n"))
-    }
-}
-
-fn format_unified_diff(path: Option<String>, old_text: Option<&str>, new_text: &str) -> String {
-    let old = old_text.unwrap_or("");
-    let path = path.unwrap_or_else(|| "file".to_string());
-    let old_header = format!("a/{path}");
-    let new_header = format!("b/{path}");
-    let unified = TextDiff::from_lines(old, new_text)
-        .unified_diff()
-        .context_radius(2)
-        .header(&old_header, &new_header)
-        .to_string();
-
-    if unified.trim().is_empty() {
-        format!("--- {old_header}\n+++ {new_header}\n(no changes)")
-    } else {
-        unified
-    }
+    draft.flush(&mut ctx).await;
+    ctx.close_topic().await;
 }
 
 fn format_usage_update(usage: &acp::UsageUpdate) -> String {
@@ -823,18 +325,3 @@ fn format_usage_update(usage: &acp::UsageUpdate) -> String {
         usage.used, usage.size, cost
     )
 }
-
-fn rand_draft_id() -> i64 {
-    use std::sync::atomic::{AtomicI64, Ordering};
-    static COUNTER: AtomicI64 = AtomicI64::new(1);
-    COUNTER.fetch_add(1, Ordering::Relaxed)
-}
-
-fn is_plan_completed(plan: &acp::Plan) -> bool {
-    !plan.entries.is_empty()
-        && plan
-            .entries
-            .iter()
-            .all(|entry| matches!(entry.status, acp::PlanEntryStatus::Completed))
-}
-

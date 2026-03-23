@@ -3,6 +3,7 @@ mod commands;
 mod config;
 mod daemon;
 mod formatting;
+mod handlers;
 mod ipc;
 mod mcp;
 mod mcp_relay;
