@@ -17,6 +17,7 @@ mod new;
 mod permission;
 mod remove;
 mod rename;
+mod status;
 mod switch;
 mod timer;
 
@@ -29,6 +30,7 @@ use new::NewCommand;
 use permission::PermissionCommand;
 use remove::RemoveCommand;
 use rename::RenameCommand;
+use status::StatusCommand;
 use switch::SwitchCommand;
 use timer::TimerCommand;
 
@@ -65,6 +67,7 @@ fn command_registry() -> Vec<Box<dyn Command>> {
         Box::new(CommandsCommand),
         Box::new(CommandCommand),
         Box::new(TimerCommand),
+        Box::new(StatusCommand),
         Box::new(SwitchCommand),
         Box::new(StopDaemonCommand),
     ]
@@ -289,6 +292,7 @@ mod tests {
         assert!(has_registered_command("command"));
         assert!(has_registered_command("new"));
         assert!(has_registered_command("timer"));
+        assert!(has_registered_command("status"));
         assert!(has_registered_command("switch"));
         assert!(!has_registered_command("missing"));
     }
