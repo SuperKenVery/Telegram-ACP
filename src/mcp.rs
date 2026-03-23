@@ -1,12 +1,15 @@
 use anyhow::{anyhow, Result};
 use futures::channel::mpsc;
 use futures::StreamExt;
+use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, ErrorCode, ErrorData, Implementation,
-    ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
+    CallToolResult, Content, ErrorCode, ErrorData, Implementation, ProtocolVersion,
+    ServerCapabilities, ServerInfo,
 };
-use rmcp::service::{RequestContext, RxJsonRpcMessage, TxJsonRpcMessage};
-use rmcp::{RoleServer, ServerHandler, ServiceExt};
+use rmcp::service::{RxJsonRpcMessage, TxJsonRpcMessage};
+use rmcp::{tool, tool_handler, tool_router, RoleServer, ServerHandler, ServiceExt};
+use schemars::JsonSchema;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -24,6 +27,125 @@ struct McpServer {
     chat_id: ChatId,
     thread_id: i32,
     project_path: PathBuf,
+    tool_router: ToolRouter<McpServer>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct UploadMarkdownArgs {
+    /// Absolute or project-relative path to a Markdown file
+    path: String,
+    title: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct UploadFileArgs {
+    /// Absolute or project-relative path
+    path: String,
+    caption: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct UploadImageArgs {
+    /// Absolute or project-relative path
+    path: String,
+    caption: Option<String>,
+}
+
+#[tool_router]
+impl McpServer {
+    /// Render Markdown file to Telegraph and send link to the user
+    #[tool]
+    async fn upload_markdown(
+        &self,
+        Parameters(args): Parameters<UploadMarkdownArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let resolved = resolve_path(&self.project_path, &args.path);
+        let markdown = tokio::fs::read_to_string(&resolved)
+            .await
+            .map_err(|e| ErrorData::new(ErrorCode::INVALID_PARAMS, e.to_string(), None))?;
+        let title = args.title.unwrap_or_else(|| "Markdown Upload".to_string());
+        let url = telegraph::create_markdown_post(&self.telegraph, &title, &markdown)
+            .await
+            .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None))?;
+
+        let thread_id = ThreadId(MessageId(self.thread_id));
+        if let Err(e) = self
+            .bot
+            .send_message(self.chat_id, format!("Telegraph: {url}"))
+            .message_thread_id(thread_id)
+            .await
+        {
+            return Err(ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to send Telegram message: {e}"),
+                None,
+            ));
+        }
+
+        Ok(CallToolResult::success(vec![Content::text(url)]))
+    }
+
+    /// Upload a file to Telegram
+    #[tool]
+    async fn upload_file(
+        &self,
+        Parameters(args): Parameters<UploadFileArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let (input, filename) = build_input_file(&self.project_path, &args.path)?;
+
+        let thread_id = ThreadId(MessageId(self.thread_id));
+        let mut request = self
+            .bot
+            .send_document(self.chat_id, input)
+            .message_thread_id(thread_id);
+        if let Some(caption) = args.caption {
+            request = request.caption(caption);
+        }
+        request
+            .await
+            .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Uploaded file: {filename}"
+        ))]))
+    }
+
+    /// Upload an image to Telegram
+    #[tool]
+    async fn upload_image(
+        &self,
+        Parameters(args): Parameters<UploadImageArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let (input, filename) = build_input_file(&self.project_path, &args.path)?;
+
+        let thread_id = ThreadId(MessageId(self.thread_id));
+        let mut request = self
+            .bot
+            .send_photo(self.chat_id, input)
+            .message_thread_id(thread_id);
+        if let Some(caption) = args.caption {
+            request = request.caption(caption);
+        }
+        request
+            .await
+            .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None))?;
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Uploaded image: {filename}"
+        ))]))
+    }
+}
+
+#[tool_handler]
+impl ServerHandler for McpServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(
+                Implementation::new("telegram-acp", env!("CARGO_PKG_VERSION"))
+                    .with_title("Telegram MCP Relay"),
+            )
+            .with_protocol_version(ProtocolVersion::V_2025_03_26)
+    }
 }
 
 impl McpServer {
@@ -40,88 +162,7 @@ impl McpServer {
             chat_id,
             thread_id,
             project_path,
-        }
-    }
-}
-
-impl ServerHandler for McpServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(
-                Implementation::new("telegram-acp", env!("CARGO_PKG_VERSION"))
-                    .with_title("Telegram MCP Relay"),
-            )
-            .with_protocol_version(ProtocolVersion::V_2025_03_26)
-    }
-
-    async fn list_tools(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<ListToolsResult, ErrorData> {
-        let tools = vec![
-            Tool::new(
-                "upload_markdown",
-                "Render Markdown file to Telegraph and send link to the user",
-                serde_json::from_value::<rmcp::model::JsonObject>(serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "Absolute or project-relative path to a Markdown file" },
-                        "title": { "type": "string" }
-                    },
-                    "required": ["path"]
-                }))
-                .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None))?,
-            ),
-            Tool::new(
-                "upload_file",
-                "Upload a file to the Telegram topic",
-                serde_json::from_value::<rmcp::model::JsonObject>(serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "Absolute or project-relative path" },
-                        "caption": { "type": "string" }
-                    },
-                    "required": ["path"]
-                }))
-                .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None))?,
-            ),
-            Tool::new(
-                "upload_image",
-                "Upload an image to the Telegram topic",
-                serde_json::from_value::<rmcp::model::JsonObject>(serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "Absolute or project-relative path" },
-                        "caption": { "type": "string" }
-                    },
-                    "required": ["path"]
-                }))
-                .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None))?,
-            ),
-        ];
-
-        Ok(ListToolsResult {
-            tools,
-            next_cursor: None,
-            meta: None,
-        })
-    }
-
-    async fn call_tool(
-        &self,
-        request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, ErrorData> {
-        match request.name.as_ref() {
-            "upload_markdown" => self.handle_upload_markdown(request).await,
-            "upload_file" => self.handle_upload_file(request).await,
-            "upload_image" => self.handle_upload_image(request).await,
-            _ => Err(ErrorData::new(
-                ErrorCode::METHOD_NOT_FOUND,
-                "Unknown tool".to_string(),
-                None,
-            )),
+            tool_router: Self::tool_router(),
         }
     }
 }
@@ -146,9 +187,6 @@ impl McpSession {
 
         let server = McpServer::new(bot, telegraph, chat_id, thread_id, project_path);
         let session_id_for_log = id.clone();
-        // Spawn the MCP serve handshake in the background. It will block until
-        // the agent subprocess connects and sends the MCP initialize request.
-        // We must not await it here because the agent hasn't been spawned yet.
         tokio::task::spawn_local(async move {
             tracing::debug!(session_id = %session_id_for_log, "MCP server task started, waiting for initialize");
             match server.serve((outgoing_tx, incoming_rx)).await {
@@ -195,120 +233,7 @@ impl McpSession {
     }
 }
 
-#[derive(Deserialize)]
-struct UploadMarkdownArgs {
-    path: String,
-    title: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct UploadFileArgs {
-    path: String,
-    caption: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct UploadImageArgs {
-    path: String,
-    caption: Option<String>,
-}
-
-impl McpServer {
-    async fn handle_upload_markdown(
-        &self,
-        request: CallToolRequestParams,
-    ) -> Result<CallToolResult, ErrorData> {
-        let args = parse_args::<UploadMarkdownArgs>(request.arguments)?;
-        let resolved = resolve_path(&self.project_path, &args.path);
-        let markdown = tokio::fs::read_to_string(&resolved).await.map_err(|e| {
-            ErrorData::new(ErrorCode::INVALID_PARAMS, e.to_string(), None)
-        })?;
-        let title = args.title.unwrap_or_else(|| "Markdown Upload".to_string());
-        let url = telegraph::create_markdown_post(&self.telegraph, &title, &markdown)
-            .await
-            .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None))?;
-
-        let thread_id = ThreadId(MessageId(self.thread_id));
-        if let Err(e) = self
-            .bot
-            .send_message(self.chat_id, format!("Telegraph: {url}"))
-            .message_thread_id(thread_id)
-            .await
-        {
-            return Err(ErrorData::new(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to send Telegram message: {e}"),
-                None,
-            ));
-        }
-
-        Ok(CallToolResult::success(vec![Content::text(url)]))
-    }
-
-    async fn handle_upload_file(
-        &self,
-        request: CallToolRequestParams,
-    ) -> Result<CallToolResult, ErrorData> {
-        let args = parse_args::<UploadFileArgs>(request.arguments)?;
-        let (input, filename) = build_input_file(&self.project_path, &args.path)?;
-
-        let thread_id = ThreadId(MessageId(self.thread_id));
-        let mut request = self
-            .bot
-            .send_document(self.chat_id, input)
-            .message_thread_id(thread_id);
-        if let Some(caption) = args.caption {
-            request = request.caption(caption);
-        }
-        request
-            .await
-            .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None))?;
-
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Uploaded file: {filename}"
-        ))]))
-    }
-
-    async fn handle_upload_image(
-        &self,
-        request: CallToolRequestParams,
-    ) -> Result<CallToolResult, ErrorData> {
-        let args = parse_args::<UploadImageArgs>(request.arguments)?;
-        let (input, filename) = build_input_file(&self.project_path, &args.path)?;
-
-        let thread_id = ThreadId(MessageId(self.thread_id));
-        let mut request = self
-            .bot
-            .send_photo(self.chat_id, input)
-            .message_thread_id(thread_id);
-        if let Some(caption) = args.caption {
-            request = request.caption(caption);
-        }
-        request
-            .await
-            .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None))?;
-
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "Uploaded image: {filename}"
-        ))]))
-    }
-}
-
-fn parse_args<T: for<'de> Deserialize<'de>>(
-    args: Option<serde_json::Map<String, serde_json::Value>>,
-) -> Result<T, ErrorData> {
-    let value = match args {
-        Some(map) => serde_json::Value::Object(map),
-        None => serde_json::Value::Object(serde_json::Map::new()),
-    };
-    serde_json::from_value(value)
-        .map_err(|e| ErrorData::new(ErrorCode::INVALID_PARAMS, e.to_string(), None))
-}
-
-fn build_input_file(
-    project_path: &Path,
-    path: &str,
-) -> Result<(InputFile, String), ErrorData> {
+fn build_input_file(project_path: &Path, path: &str) -> Result<(InputFile, String), ErrorData> {
     let resolved = resolve_path(project_path, path);
     let display = resolved
         .file_name()
