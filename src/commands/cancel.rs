@@ -1,13 +1,9 @@
-use std::sync::Arc;
-
 use anyhow::Result;
 use async_trait::async_trait;
 use teloxide::prelude::*;
-use teloxide::types::{CallbackQuery, MessageId, ThreadId};
+use teloxide::types::{MessageId, ThreadId};
 
-use crate::daemon::DaemonHandle;
-
-use super::{cancel_prompt, Command, CommandContext};
+use super::{cancel_prompt, CallbackContext, Command, CommandContext};
 
 const CB_PREFIX: &str = "cancelq";
 
@@ -35,38 +31,36 @@ impl Command for CancelCommand {
             .await?;
         Ok(())
     }
+
+    async fn try_handle_callback(&self, ctx: CallbackContext<'_>) -> Result<bool> {
+        let Some(data) = ctx.query.data.as_deref() else {
+            return Ok(false);
+        };
+        let Some(thread_id) = parse_callback(data) else {
+            return Ok(false);
+        };
+
+        match cancel_prompt(ctx.daemon, thread_id).await {
+            Ok(()) => {
+                ctx.bot
+                    .answer_callback_query(ctx.query.id.clone())
+                    .text("Interrupt requested")
+                    .await?;
+            }
+            Err(e) => {
+                ctx.bot
+                    .answer_callback_query(ctx.query.id.clone())
+                    .text(format!("Failed: {e}"))
+                    .show_alert(true)
+                    .await?;
+            }
+        }
+
+        Ok(true)
+    }
 }
 
 fn parse_callback(data: &str) -> Option<i32> {
     let thread = data.strip_prefix(&format!("{CB_PREFIX}:"))?;
     thread.parse::<i32>().ok()
-}
-
-pub async fn try_handle_callback(
-    bot: &Bot,
-    query: &CallbackQuery,
-    daemon: &Arc<DaemonHandle>,
-) -> Result<bool> {
-    let Some(data) = query.data.as_deref() else {
-        return Ok(false);
-    };
-    let Some(thread_id) = parse_callback(data) else {
-        return Ok(false);
-    };
-
-    match cancel_prompt(daemon, thread_id).await {
-        Ok(()) => {
-            bot.answer_callback_query(query.id.clone())
-                .text("Interrupt requested")
-                .await?;
-        }
-        Err(e) => {
-            bot.answer_callback_query(query.id.clone())
-                .text(format!("Failed: {e}"))
-                .show_alert(true)
-                .await?;
-        }
-    }
-
-    Ok(true)
 }

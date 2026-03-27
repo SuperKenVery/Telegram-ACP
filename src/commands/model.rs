@@ -1,15 +1,9 @@
-use std::sync::Arc;
-
 use anyhow::Result;
 use async_trait::async_trait;
 use teloxide::prelude::*;
-use teloxide::types::{
-    CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, MessageId, ThreadId,
-};
+use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId, ThreadId};
 
-use crate::daemon::DaemonHandle;
-
-use super::{get_control_state, set_config_option, Command, CommandContext};
+use super::{get_control_state, set_config_option, CallbackContext, Command, CommandContext};
 
 const CB_PREFIX: &str = "model";
 
@@ -76,6 +70,46 @@ impl Command for ModelCommand {
 
         Ok(())
     }
+
+    async fn try_handle_callback(&self, ctx: CallbackContext<'_>) -> Result<bool> {
+        let Some(data) = ctx.query.data.as_deref() else {
+            return Ok(false);
+        };
+
+        let Some((thread_id, config_id, value_id)) = parse_callback(data) else {
+            return Ok(false);
+        };
+
+        match set_config_option(ctx.daemon, thread_id, &config_id, &value_id).await {
+            Ok(updated) => {
+                let model_name = updated
+                    .model_selector
+                    .as_ref()
+                    .and_then(|selector| {
+                        selector
+                            .options
+                            .iter()
+                            .find(|opt| opt.id == selector.current_value_id)
+                    })
+                    .map(|opt| opt.name.clone())
+                    .unwrap_or_else(|| "updated".to_string());
+
+                ctx.bot
+                    .answer_callback_query(ctx.query.id.clone())
+                    .text(format!("Model set to {model_name}"))
+                    .await?;
+            }
+            Err(e) => {
+                ctx.bot
+                    .answer_callback_query(ctx.query.id.clone())
+                    .text(format!("Failed: {e}"))
+                    .show_alert(true)
+                    .await?;
+            }
+        }
+
+        Ok(true)
+    }
 }
 
 fn encode_callback(thread_id: i32, config_id: &str, value_id: &str) -> Option<String> {
@@ -90,46 +124,4 @@ fn parse_callback(data: &str) -> Option<(i32, String, String)> {
     let config_id = parts.next()?.to_string();
     let value_id = parts.next()?.to_string();
     Some((thread_id, config_id, value_id))
-}
-
-pub async fn try_handle_callback(
-    bot: &Bot,
-    query: &CallbackQuery,
-    daemon: &Arc<DaemonHandle>,
-) -> Result<bool> {
-    let Some(data) = query.data.as_deref() else {
-        return Ok(false);
-    };
-
-    let Some((thread_id, config_id, value_id)) = parse_callback(data) else {
-        return Ok(false);
-    };
-
-    match set_config_option(daemon, thread_id, &config_id, &value_id).await {
-        Ok(updated) => {
-            let model_name = updated
-                .model_selector
-                .as_ref()
-                .and_then(|selector| {
-                    selector
-                        .options
-                        .iter()
-                        .find(|opt| opt.id == selector.current_value_id)
-                })
-                .map(|opt| opt.name.clone())
-                .unwrap_or_else(|| "updated".to_string());
-
-            bot.answer_callback_query(query.id.clone())
-                .text(format!("Model set to {model_name}"))
-                .await?;
-        }
-        Err(e) => {
-            bot.answer_callback_query(query.id.clone())
-                .text(format!("Failed: {e}"))
-                .show_alert(true)
-                .await?;
-        }
-    }
-
-    Ok(true)
 }

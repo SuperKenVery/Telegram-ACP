@@ -1,15 +1,9 @@
-use std::sync::Arc;
-
 use anyhow::Result;
 use async_trait::async_trait;
 use teloxide::prelude::*;
-use teloxide::types::{
-    CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, MessageId, ThreadId,
-};
+use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId, ThreadId};
 
-use crate::daemon::DaemonHandle;
-
-use super::{get_control_state, set_permission_mode, Command, CommandContext};
+use super::{get_control_state, set_permission_mode, CallbackContext, Command, CommandContext};
 
 const CB_PREFIX: &str = "permission";
 
@@ -74,6 +68,42 @@ impl Command for PermissionCommand {
 
         Ok(())
     }
+
+    async fn try_handle_callback(&self, ctx: CallbackContext<'_>) -> Result<bool> {
+        let Some(data) = ctx.query.data.as_deref() else {
+            return Ok(false);
+        };
+
+        let Some((thread_id, mode_id)) = parse_callback(data) else {
+            return Ok(false);
+        };
+
+        match set_permission_mode(ctx.daemon, thread_id, &mode_id).await {
+            Ok(updated) => {
+                let current = updated.current_permission_mode_id.as_deref();
+                let mode_name = updated
+                    .permission_modes
+                    .iter()
+                    .find(|mode| Some(mode.id.as_str()) == current)
+                    .map(|mode| mode.name.clone())
+                    .unwrap_or_else(|| "updated".to_string());
+
+                ctx.bot
+                    .answer_callback_query(ctx.query.id.clone())
+                    .text(format!("Permission mode set to {mode_name}"))
+                    .await?;
+            }
+            Err(e) => {
+                ctx.bot
+                    .answer_callback_query(ctx.query.id.clone())
+                    .text(format!("Failed: {e}"))
+                    .show_alert(true)
+                    .await?;
+            }
+        }
+
+        Ok(true)
+    }
 }
 
 fn encode_callback(thread_id: i32, mode_id: &str) -> Option<String> {
@@ -87,42 +117,4 @@ fn parse_callback(data: &str) -> Option<(i32, String)> {
     let thread_id = parts.next()?.parse::<i32>().ok()?;
     let mode_id = parts.next()?.to_string();
     Some((thread_id, mode_id))
-}
-
-pub async fn try_handle_callback(
-    bot: &Bot,
-    query: &CallbackQuery,
-    daemon: &Arc<DaemonHandle>,
-) -> Result<bool> {
-    let Some(data) = query.data.as_deref() else {
-        return Ok(false);
-    };
-
-    let Some((thread_id, mode_id)) = parse_callback(data) else {
-        return Ok(false);
-    };
-
-    match set_permission_mode(daemon, thread_id, &mode_id).await {
-        Ok(updated) => {
-            let current = updated.current_permission_mode_id.as_deref();
-            let mode_name = updated
-                .permission_modes
-                .iter()
-                .find(|mode| Some(mode.id.as_str()) == current)
-                .map(|mode| mode.name.clone())
-                .unwrap_or_else(|| "updated".to_string());
-
-            bot.answer_callback_query(query.id.clone())
-                .text(format!("Permission mode set to {mode_name}"))
-                .await?;
-        }
-        Err(e) => {
-            bot.answer_callback_query(query.id.clone())
-                .text(format!("Failed: {e}"))
-                .show_alert(true)
-                .await?;
-        }
-    }
-
-    Ok(true)
 }

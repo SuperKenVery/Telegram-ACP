@@ -11,26 +11,26 @@ use crate::session_control::SessionControlState;
 mod cancel;
 mod command;
 mod commands;
-mod stop_daemon;
 mod model;
 mod new;
 mod permission;
 mod remove;
 mod rename;
 mod status;
+mod stop_daemon;
 mod switch;
 mod timer;
 
 use cancel::CancelCommand;
 use command::CommandCommand;
 use commands::CommandsCommand;
-use stop_daemon::StopDaemonCommand;
 use model::ModelCommand;
 use new::NewCommand;
 use permission::PermissionCommand;
 use remove::RemoveCommand;
 use rename::RenameCommand;
 use status::StatusCommand;
+use stop_daemon::StopDaemonCommand;
 use switch::SwitchCommand;
 use timer::TimerCommand;
 
@@ -49,11 +49,21 @@ impl CommandContext<'_> {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct CallbackContext<'a> {
+    pub bot: &'a Bot,
+    pub query: &'a CallbackQuery,
+    pub daemon: &'a DaemonHandle,
+}
+
 #[async_trait]
 pub trait Command: Send + Sync {
     fn name(&self) -> &'static str;
     fn description(&self) -> &'static str;
     async fn execute(&self, ctx: CommandContext<'_>) -> Result<()>;
+    async fn try_handle_callback(&self, _ctx: CallbackContext<'_>) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 fn command_registry() -> Vec<Box<dyn Command>> {
@@ -167,20 +177,16 @@ pub async fn handle_callback_query(
         return Ok(());
     }
 
-    if model::try_handle_callback(&bot, &query, &daemon).await? {
-        return Ok(());
-    }
+    let ctx = CallbackContext {
+        bot: &bot,
+        query: &query,
+        daemon: daemon.as_ref(),
+    };
 
-    if permission::try_handle_callback(&bot, &query, &daemon).await? {
-        return Ok(());
-    }
-
-    if cancel::try_handle_callback(&bot, &query, &daemon).await? {
-        return Ok(());
-    }
-
-    if switch::try_handle_callback(&bot, &query, &daemon).await? {
-        return Ok(());
+    for command in command_registry() {
+        if command.try_handle_callback(ctx).await? {
+            return Ok(());
+        }
     }
 
     bot.answer_callback_query(query.id)

@@ -1,15 +1,9 @@
-use std::sync::Arc;
-
 use anyhow::Result;
 use async_trait::async_trait;
 use teloxide::prelude::*;
-use teloxide::types::{
-    CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, MessageId, ThreadId,
-};
+use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup, MessageId, ThreadId};
 
-use crate::daemon::DaemonHandle;
-
-use super::{Command, CommandContext};
+use super::{CallbackContext, Command, CommandContext};
 
 const CB_PREFIX: &str = "switch";
 
@@ -108,6 +102,72 @@ impl Command for SwitchCommand {
 
         Ok(())
     }
+
+    async fn try_handle_callback(&self, ctx: CallbackContext<'_>) -> Result<bool> {
+        let Some(data) = ctx.query.data.as_deref() else {
+            return Ok(false);
+        };
+        let Some((thread_id, index)) = parse_callback(data) else {
+            return Ok(false);
+        };
+
+        let record = {
+            let Some(topic) = ctx.daemon.topics.get(&thread_id) else {
+                ctx.bot
+                    .answer_callback_query(ctx.query.id.clone())
+                    .text("Topic no longer exists")
+                    .show_alert(true)
+                    .await?;
+                return Ok(true);
+            };
+
+            let Some(record) = topic.history.get(index) else {
+                ctx.bot
+                    .answer_callback_query(ctx.query.id.clone())
+                    .text("Session not found")
+                    .show_alert(true)
+                    .await?;
+                return Ok(true);
+            };
+
+            if topic
+                .active
+                .as_ref()
+                .and_then(|s| s.acp_session_id.as_deref())
+                .map(|id| id == record.acp_session_id)
+                .unwrap_or(false)
+            {
+                ctx.bot
+                    .answer_callback_query(ctx.query.id.clone())
+                    .text("Already active")
+                    .await?;
+                return Ok(true);
+            }
+
+            record.clone()
+        };
+
+        match ctx.daemon.switch_to_session(thread_id, &record).await {
+            Ok(new_id) => {
+                ctx.bot
+                    .answer_callback_query(ctx.query.id.clone())
+                    .text(format!(
+                        "Switched to session {}",
+                        &new_id[..8.min(new_id.len())]
+                    ))
+                    .await?;
+            }
+            Err(e) => {
+                ctx.bot
+                    .answer_callback_query(ctx.query.id.clone())
+                    .text(format!("Failed: {e}"))
+                    .show_alert(true)
+                    .await?;
+            }
+        }
+
+        Ok(true)
+    }
 }
 
 fn parse_callback(data: &str) -> Option<(i32, usize)> {
@@ -116,71 +176,4 @@ fn parse_callback(data: &str) -> Option<(i32, usize)> {
     let thread_id = parts.next()?.parse::<i32>().ok()?;
     let index = parts.next()?.parse::<usize>().ok()?;
     Some((thread_id, index))
-}
-
-pub async fn try_handle_callback(
-    bot: &Bot,
-    query: &CallbackQuery,
-    daemon: &Arc<DaemonHandle>,
-) -> Result<bool> {
-    let Some(data) = query.data.as_deref() else {
-        return Ok(false);
-    };
-    let Some((thread_id, index)) = parse_callback(data) else {
-        return Ok(false);
-    };
-
-    // Look up the history record
-    let record = {
-        let Some(topic) = daemon.topics.get(&thread_id) else {
-            bot.answer_callback_query(query.id.clone())
-                .text("Topic no longer exists")
-                .show_alert(true)
-                .await?;
-            return Ok(true);
-        };
-
-        let Some(record) = topic.history.get(index) else {
-            bot.answer_callback_query(query.id.clone())
-                .text("Session not found")
-                .show_alert(true)
-                .await?;
-            return Ok(true);
-        };
-
-        // Check if already active
-        if topic
-            .active
-            .as_ref()
-            .and_then(|s| s.acp_session_id.as_deref())
-            .map(|id| id == record.acp_session_id)
-            .unwrap_or(false)
-        {
-            bot.answer_callback_query(query.id.clone())
-                .text("Already active")
-                .await?;
-            return Ok(true);
-        }
-
-        record.clone()
-    };
-
-    match daemon.switch_to_session(thread_id, &record).await {
-        Ok(new_id) => {
-            bot.answer_callback_query(query.id.clone())
-                .text(format!(
-                    "Switched to session {}",
-                    &new_id[..8.min(new_id.len())]
-                ))
-                .await?;
-        }
-        Err(e) => {
-            bot.answer_callback_query(query.id.clone())
-                .text(format!("Failed: {e}"))
-                .show_alert(true)
-                .await?;
-        }
-    }
-
-    Ok(true)
 }
