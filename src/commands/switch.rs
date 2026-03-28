@@ -149,6 +149,12 @@ impl Command for SwitchCommand {
 
         match ctx.daemon.switch_to_session(thread_id, &record).await {
             Ok(new_id) => {
+                let selected_label = record
+                    .agent_name
+                    .as_deref()
+                    .unwrap_or(record.agent_command.as_str())
+                    .to_string();
+
                 ctx.bot
                     .answer_callback_query(ctx.query.id.clone())
                     .text(format!(
@@ -156,6 +162,17 @@ impl Command for SwitchCommand {
                         &new_id[..8.min(new_id.len())]
                     ))
                     .await?;
+
+                if let Some(message) = ctx.query.message.as_ref() {
+                    let _ = ctx
+                        .bot
+                        .edit_message_text(
+                            message.chat().id,
+                            message.id(),
+                            format!("{selected_label} is now selected."),
+                        )
+                        .await;
+                }
             }
             Err(e) => {
                 ctx.bot

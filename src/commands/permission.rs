@@ -92,6 +92,17 @@ impl Command for PermissionCommand {
                     .answer_callback_query(ctx.query.id.clone())
                     .text(format!("Permission mode set to {mode_name}"))
                     .await?;
+
+                if let Some(message) = ctx.query.message.as_ref() {
+                    let _ = ctx
+                        .bot
+                        .edit_message_text(
+                            message.chat().id,
+                            message.id(),
+                            format!("{mode_name} is now selected."),
+                        )
+                        .await;
+                }
             }
             Err(e) => {
                 ctx.bot

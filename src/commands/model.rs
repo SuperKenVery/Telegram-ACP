@@ -98,6 +98,17 @@ impl Command for ModelCommand {
                     .answer_callback_query(ctx.query.id.clone())
                     .text(format!("Model set to {model_name}"))
                     .await?;
+
+                if let Some(message) = ctx.query.message.as_ref() {
+                    let _ = ctx
+                        .bot
+                        .edit_message_text(
+                            message.chat().id,
+                            message.id(),
+                            format!("{model_name} is now selected."),
+                        )
+                        .await;
+                }
             }
             Err(e) => {
                 ctx.bot
