@@ -1,11 +1,10 @@
 //! A mock ACP agent for testing telegram-acp.
 //!
 //! Speaks the ACP protocol over stdin/stdout. On each prompt it:
-//! 1. Sends a greeting text message
-//! 2. Simulates a "Read" tool call
-//! 3. Simulates a "Write" tool call with some code output
-//! 4. Sends a summary text message
-//! 5. Returns with StopReason::EndTurn
+//! 1. Parses the input as JSON with format: `{ "messages": [...], "delay": 0.5 }`
+//! 2. Sends each message in the array sequentially
+//! 3. Adds delay between pairs of messages (every 2 messages)
+//! 4. Returns with StopReason::EndTurn
 
 use acp::Client; // needed to call session_notification on AgentSideConnection
 use agent_client_protocol as acp;
@@ -66,7 +65,7 @@ impl acp::Agent for MockAgent {
         let conn = self.conn.get().expect("connection not set");
         let sid = args.session_id.clone();
 
-        // Extract prompt text
+        // Extract prompt text and parse as JSON
         let prompt_text: String = args
             .prompt
             .iter()
@@ -77,93 +76,36 @@ impl acp::Agent for MockAgent {
             .collect::<Vec<_>>()
             .join(" ");
 
-        // 1. Send a greeting
-        send_text(
-            conn,
-            &sid,
-            &format!("Hello! I received your prompt: \"{prompt_text}\"\n\nLet me work on that."),
-        )
-        .await;
+        let input: serde_json::Value = match serde_json::from_str(&prompt_text) {
+            Ok(v) => v,
+            Err(e) => {
+                send_text(conn, &sid, &format!("Failed to parse input JSON: {e}")).await;
+                return Ok(acp::PromptResponse::new(acp::StopReason::EndTurn));
+            }
+        };
 
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let messages = match input.get("messages").and_then(|m| m.as_array()) {
+            Some(m) => m.clone(),
+            None => {
+                send_text(conn, &sid, "No 'messages' array in input JSON").await;
+                return Ok(acp::PromptResponse::new(acp::StopReason::EndTurn));
+            }
+        };
 
-        // 2. Simulate a "Read" tool call
-        let read_id = acp::ToolCallId::new("tool-1");
-        conn.session_notification(acp::SessionNotification::new(
-            sid.clone(),
-            acp::SessionUpdate::ToolCall(
-                acp::ToolCall::new(read_id.clone(), "Read src/main.rs")
-                    .status(acp::ToolCallStatus::InProgress),
-            ),
-        ))
-        .await
-        .ok();
+        let delay_secs = input.get("delay").and_then(|d| d.as_f64()).unwrap_or(0.5);
+        let delay = Duration::from_secs_f64(delay_secs);
 
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        // Send each message back-to-back with delay between pairs
+        for (i, msg) in messages.iter().enumerate() {
+            if let Err(e) = send_json_notification(conn, &sid, msg).await {
+                eprintln!("mock-agent: failed to send message {i}: {e}");
+            }
 
-        // Read tool call complete
-        conn.session_notification(acp::SessionNotification::new(
-            sid.clone(),
-            acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
-                read_id,
-                acp::ToolCallUpdateFields::new()
-                    .status(acp::ToolCallStatus::Completed)
-                    .title("Read src/main.rs".to_string())
-                    .content(vec![acp::ToolCallContent::Content(acp::Content::new(
-                        "fn main() {\n    println!(\"Hello, world!\");\n}",
-                    ))]),
-            )),
-        ))
-        .await
-        .ok();
-
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-        // 3. Simulate a "Write" tool call
-        let write_id = acp::ToolCallId::new("tool-2");
-        conn.session_notification(acp::SessionNotification::new(
-            sid.clone(),
-            acp::SessionUpdate::ToolCall(
-                acp::ToolCall::new(write_id.clone(), "Write src/main.rs")
-                    .status(acp::ToolCallStatus::InProgress),
-            ),
-        ))
-        .await
-        .ok();
-
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-
-        conn.session_notification(acp::SessionNotification::new(
-            sid.clone(),
-            acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
-                write_id,
-                acp::ToolCallUpdateFields::new()
-                    .status(acp::ToolCallStatus::Completed)
-                    .title("Write src/main.rs".to_string())
-                    .content(vec![acp::ToolCallContent::Content(acp::Content::new(
-                        concat!(
-                            "fn main() {\n",
-                            "    println!(\"Hello from mock agent!\");\n",
-                            "    // Added by mock agent\n",
-                            "    let x = 42;\n",
-                            "    println!(\"The answer is {x}\");\n",
-                            "}",
-                        ),
-                    ))]),
-            )),
-        ))
-        .await
-        .ok();
-
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-        // 4. Send summary
-        send_text(
-            conn,
-            &sid,
-            "Done! I've updated `src/main.rs` to print a greeting and the answer to life.",
-        )
-        .await;
+            // Add delay between pairs (every 2 messages)
+            if i % 2 == 1 && i < messages.len() - 1 {
+                tokio::time::sleep(delay).await;
+            }
+        }
 
         Ok(acp::PromptResponse::new(acp::StopReason::EndTurn))
     }
@@ -184,6 +126,28 @@ async fn send_text(conn: &acp::AgentSideConnection, sid: &acp::SessionId, text: 
     .ok();
 }
 
+/// Sends a raw JSON message as a session notification.
+/// The JSON should be a valid ACP session update message.
+async fn send_json_notification(
+    conn: &acp::AgentSideConnection,
+    sid: &acp::SessionId,
+    msg: &serde_json::Value,
+) -> anyhow::Result<()> {
+    // Clone and overwrite sessionId to our real session id
+    let mut msg = msg.clone();
+    let sid_str = sid.to_string();
+    if let Some(params) = msg.get_mut("params") {
+        // Overwrite sessionId in params
+        params["sessionId"] = serde_json::json!(sid_str);
+    }
+
+    // Parse the JSON into an ACP SessionUpdate enum
+    let update: acp::SessionUpdate = serde_json::from_value(msg["params"]["update"].clone())?;
+    conn.session_notification(acp::SessionNotification::new(sid.clone(), update))
+        .await?;
+    Ok(())
+}
+
 async fn mcp_probe(server: acp::McpServer) -> anyhow::Result<()> {
     match server {
         acp::McpServer::Stdio(stdio) => {
@@ -196,9 +160,18 @@ async fn mcp_probe(server: acp::McpServer) -> anyhow::Result<()> {
             cmd.stderr(std::process::Stdio::piped());
 
             let mut child = cmd.spawn()?;
-            let mut stdin = child.stdin.take().ok_or_else(|| anyhow::anyhow!("missing stdin"))?;
-            let stdout = child.stdout.take().ok_or_else(|| anyhow::anyhow!("missing stdout"))?;
-            let stderr = child.stderr.take().ok_or_else(|| anyhow::anyhow!("missing stderr"))?;
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("missing stdin"))?;
+            let stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("missing stdout"))?;
+            let stderr = child
+                .stderr
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("missing stderr"))?;
 
             let stderr_handle: JoinHandle<()> = tokio::task::spawn_local(async move {
                 let mut reader = BufReader::new(stderr);
@@ -234,7 +207,8 @@ async fn mcp_probe(server: acp::McpServer) -> anyhow::Result<()> {
 
             while tokio::time::Instant::now() < deadline && !(got_init && got_tools) {
                 line.clear();
-                match tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut line)).await
+                match tokio::time::timeout(Duration::from_secs(2), reader.read_line(&mut line))
+                    .await
                 {
                     Ok(Ok(0)) => break,
                     Ok(Ok(_)) => {
@@ -282,7 +256,10 @@ async fn mcp_probe(server: acp::McpServer) -> anyhow::Result<()> {
             let _ = stderr_handle.await;
         }
         other => {
-            eprintln!("mock-agent: MCP server type not supported for probe: {:?}", other);
+            eprintln!(
+                "mock-agent: MCP server type not supported for probe: {:?}",
+                other
+            );
         }
     }
 

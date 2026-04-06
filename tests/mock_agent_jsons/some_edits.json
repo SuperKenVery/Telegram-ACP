@@ -1,0 +1,74 @@
+{
+  "messages": [
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess_abc123def456",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_001",
+          "title": "Reading configuration file",
+          "kind": "read",
+          "status": "pending"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess_abc123def456",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_001",
+          "title": "Writing configuration file",
+          "kind": "edit",
+          "status": "completed",
+          "content": [
+            {
+              "type": "diff",
+              "path": "/home/user/project/src/config.json",
+              "oldText": "{\n  \"debug\": false\n}",
+              "newText": "{\n  \"debug\": true\n}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess_abc123def456",
+        "update": {
+          "sessionUpdate": "tool_call",
+          "toolCallId": "call_001",
+          "status": "completed"
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess_abc123def456",
+        "update": {
+          "sessionUpdate": "agent_message_chunk",
+          "content": {
+            "type": "text",
+            "text": "Let me try responding to your message!!"
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "result": {
+        "stopReason": "end_turn"
+      }
+    }
+  ],
+  "delay": 0.2
+}
