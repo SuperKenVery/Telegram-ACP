@@ -44,6 +44,7 @@
         "update": {
           "sessionUpdate": "tool_call",
           "toolCallId": "call_001",
+          "title": "Reading configuration file",
           "status": "completed"
         }
       }
@@ -64,8 +65,9 @@
     },
     {
       "jsonrpc": "2.0",
-      "id": 2,
-      "result": {
+      "method": "sessionn/prompt",
+      "params": {
+        "sessionId": "",
         "stopReason": "end_turn"
       }
     }

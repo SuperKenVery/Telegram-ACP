@@ -1,0 +1,55 @@
+{
+  "messages": [
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess_abc123def456",
+        "update": {
+          "sessionUpdate": "agent_message_chunk",
+          "content": {
+            "type": "text",
+            "text": "OnlyText, nothing else!"
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess_abc123def456",
+        "update": {
+          "sessionUpdate": "agent_message_chunk",
+          "content": {
+            "type": "text",
+            "text": "\nSecond part of text"
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "session/update",
+      "params": {
+        "sessionId": "sess_abc123def456",
+        "update": {
+          "sessionUpdate": "agent_message_chunk",
+          "content": {
+            "type": "text",
+            "text": "\nThird part of text"
+          }
+        }
+      }
+    },
+    {
+      "jsonrpc": "2.0",
+      "method": "sessionn/prompt",
+      "params": {
+        "sessionId": "",
+        "stopReason": "end_turn"
+      }
+    }
+  ],
+  "delay": 1
+}

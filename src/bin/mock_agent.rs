@@ -8,6 +8,7 @@
 
 use acp::Client; // needed to call session_notification on AgentSideConnection
 use agent_client_protocol as acp;
+use serde_json::Value;
 use std::cell::OnceCell;
 use std::rc::Rc;
 use std::time::Duration;
@@ -18,6 +19,17 @@ use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 struct MockAgent {
     conn: Rc<OnceCell<acp::AgentSideConnection>>,
+}
+
+#[derive(serde::Deserialize)]
+struct ResponseConfig {
+    messages: Vec<Value>,
+    #[serde(default = "default_delay")]
+    delay: f64,
+}
+
+fn default_delay() -> f64 {
+    0.5
 }
 
 #[async_trait::async_trait(?Send)]
@@ -84,27 +96,23 @@ impl acp::Agent for MockAgent {
             }
         };
 
-        let messages = match input.get("messages").and_then(|m| m.as_array()) {
-            Some(m) => m.clone(),
-            None => {
-                send_text(conn, &sid, "No 'messages' array in input JSON").await;
+        let config: ResponseConfig = match serde_json::from_value(input) {
+            Ok(c) => c,
+            Err(e) => {
+                send_text(conn, &sid, &format!("Failed to parse input: {e}")).await;
                 return Ok(acp::PromptResponse::new(acp::StopReason::EndTurn));
             }
         };
 
-        let delay_secs = input.get("delay").and_then(|d| d.as_f64()).unwrap_or(0.5);
-        let delay = Duration::from_secs_f64(delay_secs);
+        let delay = Duration::from_secs_f64(config.delay);
 
         // Send each message back-to-back with delay between pairs
-        for (i, msg) in messages.iter().enumerate() {
+        for (i, msg) in config.messages.iter().enumerate() {
             if let Err(e) = send_json_notification(conn, &sid, msg).await {
                 eprintln!("mock-agent: failed to send message {i}: {e}");
             }
 
-            // Add delay between pairs (every 2 messages)
-            if i % 2 == 1 && i < messages.len() - 1 {
-                tokio::time::sleep(delay).await;
-            }
+            tokio::time::sleep(delay).await;
         }
 
         Ok(acp::PromptResponse::new(acp::StopReason::EndTurn))
