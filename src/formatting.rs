@@ -108,12 +108,14 @@ pub fn format_plan(plan: &acp::Plan) -> String {
         .unwrap_or("Plan");
 
     let mut lines = Vec::with_capacity(entries.len() + 2);
-    lines.push(format!("<b>{}</b>", escape_html(title)));
+    lines.push(format!("<b>Progress: {}</b>", escape_html(title)));
     lines.push(String::new());
 
     for (idx, entry) in entries.iter().enumerate() {
         let content = escape_html(&entry.content);
         let line = match entry.status {
+            acp::PlanEntryStatus::Pending => format!("{}. ⏳ {}", idx + 1, content),
+            acp::PlanEntryStatus::InProgress => format!("{}. 🚧 {}", idx + 1, content),
             acp::PlanEntryStatus::Completed => format!("{}. ✅ {}", idx + 1, content),
             _ => format!("{}. {}", idx + 1, content),
         };
