@@ -11,6 +11,7 @@ use tokio::time::{sleep_until, Duration, Instant};
 
 use crate::formatting;
 use crate::types::AgentEvent;
+use crate::sess_warn;
 
 // --- OutboundThrottle (moved from session.rs) ---
 
@@ -68,13 +69,20 @@ impl EventContext {
 
     pub async fn send_html(&mut self, text: &str, silent: bool) -> Option<Message> {
         self.throttle.wait_turn().await;
-        self.bot
+        match self
+            .bot
             .send_message(self.chat_id, text)
             .message_thread_id(ThreadId(MessageId(self.thread_id)))
             .parse_mode(ParseMode::Html)
             .disable_notification(silent)
             .await
-            .ok()
+        {
+            Ok(message) => Some(message),
+            Err(err) => {
+                sess_warn!("Failed to send HTML message to Telegram: {err}");
+                None
+            }
+        }
     }
 
     pub async fn send_html_chunks(&mut self, text: &str, silent: bool) {
@@ -87,7 +95,8 @@ impl EventContext {
                 .message_thread_id(ThreadId(MessageId(self.thread_id)))
                 .parse_mode(ParseMode::Html)
                 .disable_notification(silent)
-                .await;
+                .await
+                .map_err(|err| sess_warn!("Failed to send HTML message chunk to Telegram: {err}"));
         }
     }
 
@@ -101,22 +110,32 @@ impl EventContext {
                 .message_thread_id(ThreadId(MessageId(self.thread_id)))
                 .parse_mode(parse_mode)
                 .disable_notification(silent)
-                .await;
+                .await
+                .map_err(|err| sess_warn!("Failed to send Telegram message chunk: {err}"));
         }
     }
 
     pub async fn edit_html(&mut self, msg_id: MessageId, text: &str) -> bool {
         self.throttle.wait_turn().await;
-        self.bot
+        match self
+            .bot
             .edit_message_text(self.chat_id, msg_id, text)
             .parse_mode(ParseMode::Html)
             .await
-            .is_ok()
+        {
+            Ok(_) => true,
+            Err(err) => {
+                sess_warn!("Failed to edit Telegram message {}: {}", msg_id.0, err);
+                false
+            }
+        }
     }
 
     pub async fn delete_msg(&mut self, msg_id: MessageId) {
         self.throttle.wait_turn().await;
-        let _ = self.bot.delete_message(self.chat_id, msg_id).await;
+        if let Err(err) = self.bot.delete_message(self.chat_id, msg_id).await {
+            sess_warn!("Failed to delete Telegram message {}: {}", msg_id.0, err);
+        }
     }
 
     pub async fn pin_msg(&mut self, msg_id: MessageId) {
@@ -127,12 +146,7 @@ impl EventContext {
             .disable_notification(true)
             .await
         {
-            tracing::warn!(
-                chat_id = self.chat_id.0,
-                thread_id = self.thread_id,
-                message_id = msg_id.0,
-                "Failed to pin message: {e}"
-            );
+            sess_warn!("Failed to pin Telegram message {}: {}", msg_id.0, e);
         }
     }
 
@@ -141,7 +155,8 @@ impl EventContext {
         let _ = self
             .bot
             .close_forum_topic(self.chat_id, ThreadId(MessageId(self.thread_id)))
-            .await;
+            .await
+            .map_err(|err| sess_warn!("Failed to close Telegram topic: {err}"));
     }
 }
 

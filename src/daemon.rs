@@ -12,16 +12,20 @@ use rmcp::RoleServer;
 use serde_json::Value as JsonValue;
 use telegraph_rs::Telegraph;
 use teloxide::prelude::*;
+use teloxide::types::InputFile;
 use tokio::sync::{mpsc, oneshot};
+use uuid::Uuid;
 
 use crate::acp;
 use crate::config::Config;
 use crate::mcp;
 use crate::persistence::{self, PersistedTopic};
 use crate::session;
+use crate::session_log::{self, SessionContext, SessionLog, with_session_context};
 use crate::session_control::{self, SessionCommand};
 use crate::telegram;
 use crate::types::{AgentEvent, SessionRecord, SessionStatus};
+use crate::{sess_error, sess_info};
 
 /// Shared daemon state, accessible from Telegram handlers and IPC.
 pub struct DaemonHandle {
@@ -46,6 +50,7 @@ pub struct SessionEntry {
     pub acp_session_id: Option<String>,
     pub mcp_session_id: String,
     pub mcp: Arc<mcp::McpSession>,
+    pub session_log: Arc<SessionLog>,
     pub project_path: PathBuf,
     pub agent_command: String,
     pub agent_name: Option<String>,
@@ -401,6 +406,14 @@ impl DaemonHandle {
         let available_commands = Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
         let status = Arc::new(tokio::sync::Mutex::new(SessionStatus::Initializing));
+        let session_log = SessionLog::new(
+            Uuid::new_v4().to_string(),
+            thread_id,
+            project_path.clone(),
+            agent_cmd.clone(),
+            agent_name.clone(),
+        )?;
+        let session_context = SessionContext::new(session_log.clone());
         let mcp_session = Arc::new(
             mcp::McpSession::new(
                 self.bot.clone(),
@@ -417,12 +430,15 @@ impl DaemonHandle {
         // Spawn the event consumer within LocalSet.
         let bot = self.bot.clone();
         let chat_id = ChatId(self.config.chat_id);
-        tokio::task::spawn_local(session::run_event_consumer(
-            bot,
-            chat_id,
-            thread_id,
-            event_rx,
-            available_commands.clone(),
+        tokio::task::spawn_local(with_session_context(
+            session_context.clone(),
+            session::run_event_consumer(
+                bot,
+                chat_id,
+                thread_id,
+                event_rx,
+                available_commands.clone(),
+            ),
         ));
 
         // Insert a SessionEntry with a placeholder acp_session_id into topics
@@ -440,6 +456,7 @@ impl DaemonHandle {
             acp_session_id: None, // filled in after init completes
             mcp_session_id: mcp_session_id.clone(),
             mcp: mcp_session.clone(),
+            session_log: session_log.clone(),
             project_path: project_path.clone(),
             agent_command: agent_cmd.clone(),
             agent_name: agent_name.clone(),
@@ -461,25 +478,34 @@ impl DaemonHandle {
         let (result_tx, result_rx) = oneshot::channel();
 
         // Spawn ACP init + session loop directly in LocalSet.
-        tokio::task::spawn_local(spawn_and_run_agent(
-            agent_cmd.clone(),
-            project_path.clone(),
-            event_tx,
-            command_rx,
-            cancel_rx,
-            status.clone(),
-            control_state,
-            self.bot.clone(),
-            ChatId(self.config.chat_id),
-            thread_id,
-            existing_acp_session_id,
-            initiated_via_switch,
-            mcp_servers,
-            result_tx,
+        tokio::task::spawn_local(with_session_context(
+            session_context,
+            spawn_and_run_agent(
+                agent_cmd.clone(),
+                project_path.clone(),
+                session_log,
+                event_tx,
+                command_rx,
+                cancel_rx,
+                status.clone(),
+                control_state,
+                self.bot.clone(),
+                ChatId(self.config.chat_id),
+                thread_id,
+                existing_acp_session_id,
+                initiated_via_switch,
+                mcp_servers,
+                result_tx,
+            ),
         ));
 
         // Wait for ACP init to complete, then fill in the real acp_session_id.
         let acp_session_id = result_rx.await??;
+        if let Some(topic) = self.topics.get(&thread_id) {
+            if let Some(active) = topic.active.as_ref() {
+                active.session_log.set_acp_session_id(acp_session_id.clone())?;
+            }
+        }
         if let Some(mut topic) = self.topics.get_mut(&thread_id) {
             if let Some(active) = topic.active.as_mut() {
                 active.acp_session_id = Some(acp_session_id.clone());
@@ -529,6 +555,7 @@ impl DaemonHandle {
 async fn spawn_and_run_agent(
     agent_cmd: String,
     project_path: PathBuf,
+    session_log: Arc<SessionLog>,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
     command_rx: mpsc::UnboundedReceiver<SessionCommand>,
     cancel_rx: mpsc::UnboundedReceiver<oneshot::Sender<Result<()>>>,
@@ -542,9 +569,15 @@ async fn spawn_and_run_agent(
     mcp_servers: Vec<acp_sdk::McpServer>,
     result_tx: oneshot::Sender<Result<String>>,
 ) {
+    sess_info!(
+        "ACP init started for project {} with agent {}",
+        project_path.display(),
+        agent_cmd
+    );
     match init_agent(
         &agent_cmd,
         &project_path,
+        session_log.clone(),
         event_tx.clone(),
         &existing_acp_session_id,
         mcp_servers,
@@ -552,6 +585,10 @@ async fn spawn_and_run_agent(
     .await
     {
         Ok((conn, mut child, bootstrap, session_loading_in_progress)) => {
+            sess_info!(
+                "ACP init completed with session {}",
+                bootstrap.session_id
+            );
             if existing_acp_session_id.is_some() && initiated_via_switch {
                 // On daemon restart, we send nothing
                 let msg = "Switched to the selected session. Replay hidden; ready for new prompts.";
@@ -606,14 +643,34 @@ async fn spawn_and_run_agent(
 
             // Clean up child process
             let _ = child.kill().await;
+            sess_info!("Session runtime finished");
         }
         Err(e) => {
+            sess_error!(
+                "Failed to initialize ACP agent (cmd: {}, project: {}): {:#}",
+                agent_cmd,
+                project_path.display(),
+                e
+            );
             tracing::error!(
                 "Failed to initialize ACP agent (cmd: {}, project: {}): {:#}",
                 agent_cmd,
                 project_path.display(),
                 e
             );
+            let stderr_path = session_log.agent_stderr_path();
+            if stderr_path.exists() {
+                let metadata = std::fs::metadata(&stderr_path).ok();
+                if metadata.map(|m| m.len() > 0).unwrap_or(false) {
+                    let _ = bot
+                        .send_document(chat_id, InputFile::file(stderr_path))
+                        .caption("Agent stderr log")
+                        .message_thread_id(teloxide::types::ThreadId(teloxide::types::MessageId(
+                            thread_id,
+                        )))
+                        .await;
+                }
+            }
             let _ = result_tx.send(Err(e));
         }
     }
@@ -623,6 +680,7 @@ async fn spawn_and_run_agent(
 async fn init_agent(
     agent_cmd: &str,
     project_path: &PathBuf,
+    session_log: Arc<SessionLog>,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
     existing_acp_session_id: &Option<String>,
     mcp_servers: Vec<acp_sdk::McpServer>,
@@ -639,6 +697,7 @@ async fn init_agent(
         agent_cmd,
         project_path,
         event_tx,
+        session_log.clone(),
         session_loading_in_progress.clone(),
     )
     .map_err(|e| {
@@ -650,15 +709,30 @@ async fn init_agent(
         )
     })?;
 
-    tokio::task::spawn_local(async move {
-        if let Err(e) = handle_io.await {
-            tracing::error!("ACP IO error: {e}");
-            let _ = io_event_tx.send(AgentEvent::Error(format!("Agent connection error: {e}")));
-        }
-    });
+    if let Some(ctx) = session_log::try_current_session_context() {
+        tokio::task::spawn_local(with_session_context(ctx, async move {
+            if let Err(e) = handle_io.await {
+                sess_error!("ACP IO error: {e}");
+                let _ = io_event_tx.send(AgentEvent::Error(format!("Agent connection error: {e}")));
+            }
+        }));
+    } else {
+        tokio::task::spawn_local(async move {
+            if let Err(e) = handle_io.await {
+                tracing::error!("ACP IO error: {e}");
+                let _ = io_event_tx.send(AgentEvent::Error(format!("Agent connection error: {e}")));
+            }
+        });
+    }
 
     let bootstrap = if let Some(old_id) = existing_acp_session_id.clone() {
-        let session = acp::resume_session(&conn, project_path, old_id.clone(), mcp_servers)
+        let session = acp::resume_session(
+            &conn,
+            project_path,
+            old_id.clone(),
+            mcp_servers,
+            &session_log,
+        )
             .await
             .map_err(|e| {
                 let stderr_tail = acp::format_stderr_tail(&stderr_tail);
@@ -673,7 +747,7 @@ async fn init_agent(
             })?;
         session
     } else {
-        acp::init_session(&conn, project_path, mcp_servers)
+        acp::init_session(&conn, project_path, mcp_servers, &session_log)
             .await
             .map_err(|e| {
                 let stderr_tail = acp::format_stderr_tail(&stderr_tail);

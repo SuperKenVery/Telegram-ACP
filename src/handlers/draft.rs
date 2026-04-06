@@ -4,6 +4,7 @@ use teloxide::types::ParseMode;
 use super::EventContext;
 use crate::formatting;
 use crate::types::AgentEvent;
+use crate::sess_warn;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DraftKind {
@@ -81,12 +82,7 @@ impl DraftHandler {
         });
         d.text.push_str(text);
         if let Err(e) = send_streaming_draft(ctx, d.draft_id, &d.text).await {
-            tracing::warn!(
-                chat_id = ctx.chat_id.0,
-                thread_id = ctx.thread_id,
-                text_len = d.text.len(),
-                "Draft message update failed: {e}"
-            );
+            sess_warn!("Draft message update failed ({} bytes): {}", d.text.len(), e);
         }
     }
 }

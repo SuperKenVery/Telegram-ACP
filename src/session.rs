@@ -12,8 +12,10 @@ use crate::handlers::plan::PlanHandler;
 use crate::handlers::tool_call::ToolCallHandler;
 use crate::handlers::working::WorkingHandler;
 use crate::handlers::{EventContext, EventHandler};
+use crate::session_log::{self, with_session_context, TranscriptDirection};
 use crate::session_control::{build_control_state, SessionCommand};
 use crate::types::{AgentEvent, SessionStatus};
+use crate::{sess_error, sess_info, sess_warn};
 
 enum PromptOutcome {
     Finished(String),
@@ -46,6 +48,7 @@ pub async fn run_session_runtime(
                 match maybe_cmd {
                     Some(SessionCommand::Prompt(user_text)) => {
                         if prompt_active {
+                            sess_info!("Prompt queued while another prompt is active");
                             pending_prompts.push_back(user_text);
                             send_queued_notice(&bot, chat_id, thread_id, &pending_prompts).await;
                         } else {
@@ -61,17 +64,35 @@ pub async fn run_session_runtime(
                         }
                     }
                     Some(SessionCommand::SetPermissionMode { mode_id, result_tx }) => {
+                        sess_info!("Changing permission mode to {}", mode_id);
+                        let request = acp::SetSessionModeRequest::new(
+                            acp_session_id.clone(),
+                            mode_id.clone(),
+                        );
+                        if let Some(ctx) = session_log::try_current_session_context() {
+                            if let Err(err) = ctx.log().log_acp_payload(
+                                TranscriptDirection::ToAgent,
+                                &serde_json::json!({ "method": "set_session_mode", "params": &request }),
+                            ) {
+                                sess_warn!("Failed to record set_session_mode request: {err}");
+                            }
+                        }
                         let result = conn
-                            .set_session_mode(acp::SetSessionModeRequest::new(
-                                acp_session_id.clone(),
-                                mode_id.clone(),
-                            ))
+                            .set_session_mode(request)
                             .await
                             .map_err(|e| anyhow::anyhow!("Failed to set permission mode: {e}"));
 
                         if result.is_ok() {
                             if let Some(state) = &mut mode_state {
                                 state.current_mode_id = acp::SessionModeId::new(mode_id.clone());
+                            }
+                            if let Some(ctx) = session_log::try_current_session_context() {
+                                if let Err(err) = ctx.log().log_acp_payload(
+                                    TranscriptDirection::FromAgent,
+                                    &serde_json::json!({ "method": "set_session_mode", "result": &mode_state }),
+                                ) {
+                                    sess_warn!("Failed to record set_session_mode response: {err}");
+                                }
                             }
                             *control_state.lock().await = build_control_state(&mode_state, &config_options);
                         }
@@ -82,17 +103,35 @@ pub async fn run_session_runtime(
                         value_id,
                         result_tx,
                     }) => {
+                        sess_info!("Changing config option {} to {}", config_id, value_id);
+                        let request = acp::SetSessionConfigOptionRequest::new(
+                            acp_session_id.clone(),
+                            config_id,
+                            value_id,
+                        );
+                        if let Some(ctx) = session_log::try_current_session_context() {
+                            if let Err(err) = ctx.log().log_acp_payload(
+                                TranscriptDirection::ToAgent,
+                                &serde_json::json!({ "method": "set_session_config_option", "params": &request }),
+                            ) {
+                                sess_warn!("Failed to record set_session_config_option request: {err}");
+                            }
+                        }
                         let result = conn
-                            .set_session_config_option(acp::SetSessionConfigOptionRequest::new(
-                                acp_session_id.clone(),
-                                config_id,
-                                value_id,
-                            ))
+                            .set_session_config_option(request)
                             .await
                             .map_err(|e| anyhow::anyhow!("Failed to set config option: {e}"));
 
                         match result {
                             Ok(resp) => {
+                                if let Some(ctx) = session_log::try_current_session_context() {
+                                    if let Err(err) = ctx.log().log_acp_payload(
+                                        TranscriptDirection::FromAgent,
+                                        &serde_json::json!({ "method": "set_session_config_option", "result": &resp }),
+                                    ) {
+                                        sess_warn!("Failed to record set_session_config_option response: {err}");
+                                    }
+                                }
                                 config_options = resp.config_options;
                                 *control_state.lock().await = build_control_state(&mode_state, &config_options);
                                 let _ = result_tx.send(Ok(()));
@@ -110,8 +149,18 @@ pub async fn run_session_runtime(
             maybe_cancel = cancel_rx.recv(), if !cancel_closed => {
                 match maybe_cancel {
                     Some(result_tx) => {
+                        sess_warn!("Session cancellation requested");
+                        let request = acp::CancelNotification::new(acp_session_id.clone());
+                        if let Some(ctx) = session_log::try_current_session_context() {
+                            if let Err(err) = ctx.log().log_acp_payload(
+                                TranscriptDirection::ToAgent,
+                                &serde_json::json!({ "method": "cancel", "params": &request }),
+                            ) {
+                                sess_warn!("Failed to record cancel request: {err}");
+                            }
+                        }
                         let result = conn
-                            .cancel(acp::CancelNotification::new(acp_session_id.clone()))
+                            .cancel(request)
                             .await
                             .map_err(|e| anyhow::anyhow!("Failed to cancel session: {e}"));
                         let _ = result_tx.send(result);
@@ -124,12 +173,15 @@ pub async fn run_session_runtime(
             maybe_done = prompt_done_rx.recv(), if prompt_active => {
                 match maybe_done {
                     Some(PromptOutcome::Finished(reason)) => {
+                        sess_info!("Prompt finished: {}", reason);
                         let _ = event_tx.send(AgentEvent::Finished(reason));
                     }
                     Some(PromptOutcome::Error(err)) => {
+                        sess_error!("Prompt failed: {}", err);
                         let _ = event_tx.send(AgentEvent::Error(err));
                     }
                     None => {
+                        sess_error!("Prompt runner closed unexpectedly");
                         let _ = event_tx.send(AgentEvent::Error("Prompt runner closed unexpectedly".to_string()));
                     }
                 }
@@ -155,6 +207,7 @@ pub async fn run_session_runtime(
 
     let mut s = status.lock().await;
     *s = SessionStatus::Finished;
+    sess_info!("Session runtime marked as finished");
 }
 
 async fn start_prompt(
@@ -170,22 +223,46 @@ async fn start_prompt(
         *s = SessionStatus::Prompting;
     }
 
+    sess_info!("Prompt started");
     let _ = event_tx.send(AgentEvent::Working);
 
-    tokio::task::spawn_local(async move {
+    let current_ctx = session_log::try_current_session_context();
+    let prompt_future = async move {
+        let request = acp::PromptRequest::new(acp_session_id, vec![user_text.into()]);
+        if let Some(ctx) = session_log::try_current_session_context() {
+            if let Err(err) = ctx.log().log_acp_payload(
+                TranscriptDirection::ToAgent,
+                &serde_json::json!({ "method": "prompt", "params": &request }),
+            ) {
+                sess_warn!("Failed to record prompt request: {err}");
+            }
+        }
         let prompt_result = conn
-            .prompt(acp::PromptRequest::new(
-                acp_session_id,
-                vec![user_text.into()],
-            ))
+            .prompt(request)
             .await;
 
         let outcome = match prompt_result {
-            Ok(resp) => PromptOutcome::Finished(format!("{:?}", resp.stop_reason)),
+            Ok(resp) => {
+                if let Some(ctx) = session_log::try_current_session_context() {
+                    if let Err(err) = ctx.log().log_acp_payload(
+                        TranscriptDirection::FromAgent,
+                        &serde_json::json!({ "method": "prompt", "result": &resp }),
+                    ) {
+                        sess_warn!("Failed to record prompt response: {err}");
+                    }
+                }
+                PromptOutcome::Finished(format!("{:?}", resp.stop_reason))
+            }
             Err(e) => PromptOutcome::Error(format!("Agent error: {e}")),
         };
         let _ = prompt_done_tx.send(outcome);
-    });
+    };
+
+    if let Some(ctx) = current_ctx {
+        tokio::task::spawn_local(with_session_context(ctx, prompt_future));
+    } else {
+        tokio::task::spawn_local(prompt_future);
+    }
 }
 
 fn build_interrupt_callback_data(thread_id: i32) -> String {
@@ -223,11 +300,7 @@ async fn send_queued_notice(
             request = request.reply_markup(keyboard.clone());
         }
         if let Err(e) = request.await {
-            tracing::warn!(
-                chat_id = chat_id.0,
-                thread_id = thread_id,
-                "Failed to send queued notice: {e}"
-            );
+            sess_warn!("Failed to send queued notice: {e}");
             break;
         }
     }
@@ -242,6 +315,7 @@ pub async fn run_event_consumer(
     mut event_rx: mpsc::UnboundedReceiver<AgentEvent>,
     available_commands_cache: Arc<Mutex<Vec<acp::AvailableCommand>>>,
 ) {
+    sess_info!("Event consumer started");
     let mut ctx = EventContext::new(bot, chat_id, thread_id);
     let mut draft = DraftHandler::new();
     let mut working = WorkingHandler::new();
@@ -305,6 +379,7 @@ pub async fn run_event_consumer(
 
     draft.flush(&mut ctx).await;
     ctx.close_topic().await;
+    sess_info!("Event consumer finished");
 }
 
 fn format_usage_update(usage: &acp::UsageUpdate) -> String {

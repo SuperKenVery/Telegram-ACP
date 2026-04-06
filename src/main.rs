@@ -9,6 +9,7 @@ mod mcp;
 mod mcp_relay;
 mod persistence;
 mod session;
+mod session_log;
 mod session_control;
 mod telegram;
 #[allow(dead_code)]
@@ -60,9 +61,7 @@ enum Commands {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    let log_dir = dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("telegram-acp");
+    let log_dir = session_log::app_data_dir().unwrap_or_else(|_| PathBuf::from("."));
     std::fs::create_dir_all(&log_dir)?;
 
     let file_appender = BasicRollingFileAppender::new(
