@@ -60,13 +60,7 @@ pub fn format_tool_call(
     status: acp::ToolCallStatus,
     details: Option<&str>,
 ) -> String {
-    let header = format_tool_header_html(name, kind, status);
-    match details {
-        Some(body) => {
-            format!("{header}\n{}", format_collapsible_block_html(body, 3800))
-        }
-        None => header,
-    }
+    format_tool_message(name, kind, status, details, 3800)
 }
 
 /// Format a tool call result/update (HTML).
@@ -77,14 +71,7 @@ pub fn format_tool_result(
     output: Option<&str>,
     details: Option<&str>,
 ) -> String {
-    let header = format_tool_header_html(name, kind, status);
-    match details.or(output) {
-        Some(body) => {
-            let section = format_collapsible_block_html(body, 3900);
-            format!("{header}\n{section}")
-        }
-        None => header,
-    }
+    format_tool_message(name, kind, status, details.or(output), 3900)
 }
 
 /// Format a completion message (HTML).
@@ -178,7 +165,25 @@ fn format_collapsible_block_html(text: &str, max_len: usize) -> String {
     format!("<blockquote expandable>{escaped}</blockquote>")
 }
 
-fn format_tool_header_html(name: &str, kind: acp::ToolKind, status: acp::ToolCallStatus) -> String {
+fn format_tool_message(
+    name: &str,
+    kind: acp::ToolKind,
+    status: acp::ToolCallStatus,
+    body: Option<&str>,
+    body_max_len: usize,
+) -> String {
+    let mut sections = vec![format_tool_header_html(name, kind, status)];
+    if let Some(body) = body {
+        sections.push(format_collapsible_block_html(body, body_max_len));
+    }
+    sections.join("\n")
+}
+
+fn format_tool_header_html(
+    name: &str,
+    kind: acp::ToolKind,
+    status: acp::ToolCallStatus,
+) -> String {
     let status_icon = match status {
         acp::ToolCallStatus::Pending => "⏳",
         acp::ToolCallStatus::InProgress => "🚧",
@@ -198,10 +203,14 @@ fn format_tool_header_html(name: &str, kind: acp::ToolKind, status: acp::ToolCal
         acp::ToolKind::Other => "🛠️",
         _ => "🛠️",
     };
-    format!(
-        "{status_icon} {kind_icon} <b>Tool:</b> {}",
-        escape_html(name)
-    )
+    match name.split_once('\n') {
+        Some((first_line, remaining)) if !remaining.trim().is_empty() => format!(
+            "{status_icon} {kind_icon} <b>Tool:</b> {}\n{}",
+            escape_html(first_line),
+            format_collapsible_block_html(remaining, 1200)
+        ),
+        _ => format!("{status_icon} {kind_icon} <b>Tool:</b> {}", escape_html(name)),
+    }
 }
 
 /// Truncate a message to fit within a maximum length.
@@ -247,7 +256,7 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_available_commands_html, markdown_to_telegram_md_v2};
+    use super::{format_available_commands_html, format_tool_call, markdown_to_telegram_md_v2};
     use agent_client_protocol as acp;
 
     #[test]
@@ -288,5 +297,30 @@ mod tests {
         let out = markdown_to_telegram_md_v2(input);
         assert!(out.starts_with("\\> "));
         assert!(out.contains("\\|"));
+    }
+
+    #[test]
+    fn formats_multiline_tool_input_in_collapsible_block() {
+        let text = format_tool_call(
+            "Run command\ncargo test\n-- --nocapture",
+            acp::ToolKind::Execute,
+            acp::ToolCallStatus::InProgress,
+            None,
+        );
+
+        assert!(text.contains("<b>Tool:</b> Run command"));
+        assert!(text.contains("<blockquote expandable>cargo test\n-- --nocapture</blockquote>"));
+    }
+
+    #[test]
+    fn keeps_single_line_tool_input_out_of_collapsible_block() {
+        let text = format_tool_call(
+            "Run cargo test",
+            acp::ToolKind::Execute,
+            acp::ToolCallStatus::InProgress,
+            None,
+        );
+
+        assert_eq!(text.matches("<blockquote expandable>").count(), 0);
     }
 }

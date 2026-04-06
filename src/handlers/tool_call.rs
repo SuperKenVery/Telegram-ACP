@@ -218,3 +218,4 @@ fn format_unified_diff(path: Option<String>, old_text: Option<&str>, new_text: &
         unified
     }
 }
+
