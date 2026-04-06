@@ -62,15 +62,8 @@
           }
         }
       }
-    },
-    {
-      "jsonrpc": "2.0",
-      "method": "sessionn/prompt",
-      "params": {
-        "sessionId": "",
-        "stopReason": "end_turn"
-      }
     }
   ],
-  "delay": 0.2
+  "delay": 0.2,
+  "response": { "stopReason": "end_turn" }
 }
