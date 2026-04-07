@@ -325,4 +325,20 @@ mod tests {
 
         assert_eq!(text.matches("<blockquote expandable>").count(), 0);
     }
+
+    #[test]
+    fn truncates_large_tool_result_to_telegram_limit() {
+        use super::format_tool_result;
+
+        let text = format_tool_result(
+            "Long tool output",
+            acp::ToolKind::Execute,
+            acp::ToolCallStatus::Completed,
+            Some(&"x".repeat(20_000)),
+            None,
+        );
+
+        assert!(text.len() <= 4096);
+        assert!(text.contains("[truncated]"));
+    }
 }

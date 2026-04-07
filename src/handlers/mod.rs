@@ -58,6 +58,10 @@ pub struct EventContext {
 }
 
 impl EventContext {
+    fn truncate_html(text: &str) -> String {
+        formatting::truncate_message(text, 4096)
+    }
+
     pub fn new(bot: Bot, chat_id: ChatId, thread_id: i32) -> Self {
         Self {
             bot,
@@ -68,6 +72,7 @@ impl EventContext {
     }
 
     pub async fn send_html(&mut self, text: &str, silent: bool) -> Option<Message> {
+        let text = Self::truncate_html(text);
         self.throttle.wait_turn().await;
         match self
             .bot
@@ -116,6 +121,8 @@ impl EventContext {
     }
 
     pub async fn edit_html(&mut self, msg_id: MessageId, text: &str) -> bool {
+        let text = Self::truncate_html(text);
+
         self.throttle.wait_turn().await;
         match self
             .bot
