@@ -5,13 +5,16 @@ pub mod plan;
 pub mod tool_call;
 pub mod working;
 
+use std::future::Future;
+
 use teloxide::prelude::*;
 use teloxide::types::{MessageId, ParseMode, ThreadId};
+use teloxide::RequestError;
 use tokio::time::{sleep_until, Duration, Instant};
 
 use crate::formatting;
-use crate::types::AgentEvent;
 use crate::sess_warn;
+use crate::types::AgentEvent;
 
 // --- OutboundThrottle (moved from session.rs) ---
 
@@ -21,8 +24,8 @@ pub struct OutboundThrottle {
 }
 
 impl OutboundThrottle {
-    pub fn per_second(count: u64) -> Self {
-        let min_interval = Duration::from_secs_f64(1.0 / count as f64);
+    pub fn with_interval(secs: f64) -> Self {
+        let min_interval = Duration::from_secs_f64(secs);
         Self {
             min_interval,
             next_allowed_at: Instant::now(),
@@ -45,6 +48,13 @@ impl OutboundThrottle {
         self.next_allowed_at = now + self.min_interval;
         true
     }
+
+    pub fn defer_for(&mut self, delay: Duration) {
+        let retry_at = Instant::now() + delay;
+        if retry_at > self.next_allowed_at {
+            self.next_allowed_at = retry_at;
+        }
+    }
 }
 
 // --- EventContext ---
@@ -58,6 +68,8 @@ pub struct EventContext {
 }
 
 impl EventContext {
+    const RETRY_AFTER_PADDING: Duration = Duration::from_secs(1);
+
     fn html_fallback_text(text: &str) -> Option<String> {
         if text.len() <= 4096 {
             None
@@ -71,20 +83,43 @@ impl EventContext {
             bot,
             chat_id,
             thread_id,
-            throttle: OutboundThrottle::per_second(1),
+            throttle: OutboundThrottle::with_interval(2.0),
+        }
+    }
+
+    async fn request_with_throttle<T, F, Fut>(&mut self, label: &str, mut request: F) -> Result<T, RequestError>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T, RequestError>>,
+    {
+        loop {
+            self.throttle.wait_turn().await;
+            match request().await {
+                Ok(value) => return Ok(value),
+                Err(RequestError::RetryAfter(after)) => {
+                    let delay = after.duration() + Self::RETRY_AFTER_PADDING;
+                    self.throttle.defer_for(delay);
+                    sess_warn!(
+                        "Telegram rate limit while {label}; backing off for {}s before retrying",
+                        delay.as_secs()
+                    );
+                }
+                Err(err) => return Err(err),
+            }
         }
     }
 
     pub async fn send_html(&mut self, text: &str, silent: bool) -> Option<Message> {
-        self.throttle.wait_turn().await;
         if let Some(text) = Self::html_fallback_text(text) {
-            match self
-                .bot
-                .send_message(self.chat_id, text)
-                .message_thread_id(ThreadId(MessageId(self.thread_id)))
-                .disable_notification(silent)
-                .await
-            {
+            let bot = self.bot.clone();
+            let chat_id = self.chat_id;
+            let thread_id = self.thread_id;
+            match self.request_with_throttle("sending plain-text fallback message to Telegram", move || {
+                bot.send_message(chat_id, text.clone())
+                    .message_thread_id(ThreadId(MessageId(thread_id)))
+                    .disable_notification(silent)
+                    .send()
+            }).await {
                 Ok(message) => Some(message),
                 Err(err) => {
                     sess_warn!("Failed to send plain-text fallback message to Telegram: {err}");
@@ -92,14 +127,17 @@ impl EventContext {
                 }
             }
         } else {
-            match self
-                .bot
-                .send_message(self.chat_id, text.to_string())
-                .message_thread_id(ThreadId(MessageId(self.thread_id)))
-                .parse_mode(ParseMode::Html)
-                .disable_notification(silent)
-                .await
-            {
+            let bot = self.bot.clone();
+            let chat_id = self.chat_id;
+            let thread_id = self.thread_id;
+            let text = text.to_string();
+            match self.request_with_throttle("sending HTML message to Telegram", move || {
+                bot.send_message(chat_id, text.clone())
+                    .message_thread_id(ThreadId(MessageId(thread_id)))
+                    .parse_mode(ParseMode::Html)
+                    .disable_notification(silent)
+                    .send()
+            }).await {
                 Ok(message) => Some(message),
                 Err(err) => {
                     sess_warn!("Failed to send HTML message to Telegram: {err}");
@@ -112,13 +150,17 @@ impl EventContext {
     pub async fn send_html_chunks(&mut self, text: &str, silent: bool) {
         let chunks = formatting::split_message(text, 4096);
         for chunk in chunks {
-            self.throttle.wait_turn().await;
+            let bot = self.bot.clone();
+            let chat_id = self.chat_id;
+            let thread_id = self.thread_id;
             let _ = self
-                .bot
-                .send_message(self.chat_id, chunk)
-                .message_thread_id(ThreadId(MessageId(self.thread_id)))
-                .parse_mode(ParseMode::Html)
-                .disable_notification(silent)
+                .request_with_throttle("sending HTML message chunk to Telegram", move || {
+                    bot.send_message(chat_id, chunk.clone())
+                        .message_thread_id(ThreadId(MessageId(thread_id)))
+                        .parse_mode(ParseMode::Html)
+                        .disable_notification(silent)
+                        .send()
+                })
                 .await
                 .map_err(|err| sess_warn!("Failed to send HTML message chunk to Telegram: {err}"));
         }
@@ -127,22 +169,33 @@ impl EventContext {
     pub async fn send_chunks(&mut self, text: &str, parse_mode: ParseMode, silent: bool) {
         let chunks = formatting::split_message(text, 4096);
         for chunk in chunks {
-            self.throttle.wait_turn().await;
+            let bot = self.bot.clone();
+            let chat_id = self.chat_id;
+            let thread_id = self.thread_id;
             let _ = self
-                .bot
-                .send_message(self.chat_id, chunk)
-                .message_thread_id(ThreadId(MessageId(self.thread_id)))
-                .parse_mode(parse_mode)
-                .disable_notification(silent)
+                .request_with_throttle("sending Telegram message chunk", move || {
+                    bot.send_message(chat_id, chunk.clone())
+                        .message_thread_id(ThreadId(MessageId(thread_id)))
+                        .parse_mode(parse_mode)
+                        .disable_notification(silent)
+                        .send()
+                })
                 .await
                 .map_err(|err| sess_warn!("Failed to send Telegram message chunk: {err}"));
         }
     }
 
     pub async fn edit_html(&mut self, msg_id: MessageId, text: &str) -> bool {
-        self.throttle.wait_turn().await;
         if let Some(text) = Self::html_fallback_text(text) {
-            match self.bot.edit_message_text(self.chat_id, msg_id, text).await {
+            let bot = self.bot.clone();
+            let chat_id = self.chat_id;
+            match self
+                .request_with_throttle(
+                    &format!("editing Telegram message {} with plain-text fallback", msg_id.0),
+                    move || bot.edit_message_text(chat_id, msg_id, text.clone()).send(),
+                )
+                .await
+            {
                 Ok(_) => true,
                 Err(err) => {
                     sess_warn!(
@@ -154,10 +207,15 @@ impl EventContext {
                 }
             }
         } else {
+            let bot = self.bot.clone();
+            let chat_id = self.chat_id;
+            let text = text.to_string();
             match self
-                .bot
-                .edit_message_text(self.chat_id, msg_id, text.to_string())
-                .parse_mode(ParseMode::Html)
+                .request_with_throttle(&format!("editing Telegram message {}", msg_id.0), move || {
+                    bot.edit_message_text(chat_id, msg_id, text.clone())
+                        .parse_mode(ParseMode::Html)
+                        .send()
+                })
                 .await
             {
                 Ok(_) => true,
@@ -170,18 +228,27 @@ impl EventContext {
     }
 
     pub async fn delete_msg(&mut self, msg_id: MessageId) {
-        self.throttle.wait_turn().await;
-        if let Err(err) = self.bot.delete_message(self.chat_id, msg_id).await {
+        let bot = self.bot.clone();
+        let chat_id = self.chat_id;
+        if let Err(err) = self
+            .request_with_throttle(&format!("deleting Telegram message {}", msg_id.0), move || {
+                bot.delete_message(chat_id, msg_id).send()
+            })
+            .await
+        {
             sess_warn!("Failed to delete Telegram message {}: {}", msg_id.0, err);
         }
     }
 
     pub async fn pin_msg(&mut self, msg_id: MessageId) {
-        self.throttle.wait_turn().await;
+        let bot = self.bot.clone();
+        let chat_id = self.chat_id;
         if let Err(e) = self
-            .bot
-            .pin_chat_message(self.chat_id, msg_id)
-            .disable_notification(true)
+            .request_with_throttle(&format!("pinning Telegram message {}", msg_id.0), move || {
+                bot.pin_chat_message(chat_id, msg_id)
+                    .disable_notification(true)
+                    .send()
+            })
             .await
         {
             sess_warn!("Failed to pin Telegram message {}: {}", msg_id.0, e);
@@ -189,10 +256,14 @@ impl EventContext {
     }
 
     pub async fn close_topic(&mut self) {
-        self.throttle.wait_turn().await;
+        let bot = self.bot.clone();
+        let chat_id = self.chat_id;
+        let thread_id = self.thread_id;
         let _ = self
-            .bot
-            .close_forum_topic(self.chat_id, ThreadId(MessageId(self.thread_id)))
+            .request_with_throttle("closing Telegram topic", move || {
+                bot.close_forum_topic(chat_id, ThreadId(MessageId(thread_id)))
+                    .send()
+            })
             .await
             .map_err(|err| sess_warn!("Failed to close Telegram topic: {err}"));
     }
