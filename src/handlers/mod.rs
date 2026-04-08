@@ -58,8 +58,12 @@ pub struct EventContext {
 }
 
 impl EventContext {
-    fn truncate_html(text: &str) -> String {
-        formatting::truncate_message(text, 4096)
+    fn html_fallback_text(text: &str) -> Option<String> {
+        if text.len() <= 4096 {
+            None
+        } else {
+            Some(formatting::truncate_message(text, 3900))
+        }
     }
 
     pub fn new(bot: Bot, chat_id: ChatId, thread_id: i32) -> Self {
@@ -72,20 +76,35 @@ impl EventContext {
     }
 
     pub async fn send_html(&mut self, text: &str, silent: bool) -> Option<Message> {
-        let text = Self::truncate_html(text);
         self.throttle.wait_turn().await;
-        match self
-            .bot
-            .send_message(self.chat_id, text)
-            .message_thread_id(ThreadId(MessageId(self.thread_id)))
-            .parse_mode(ParseMode::Html)
-            .disable_notification(silent)
-            .await
-        {
-            Ok(message) => Some(message),
-            Err(err) => {
-                sess_warn!("Failed to send HTML message to Telegram: {err}");
-                None
+        if let Some(text) = Self::html_fallback_text(text) {
+            match self
+                .bot
+                .send_message(self.chat_id, text)
+                .message_thread_id(ThreadId(MessageId(self.thread_id)))
+                .disable_notification(silent)
+                .await
+            {
+                Ok(message) => Some(message),
+                Err(err) => {
+                    sess_warn!("Failed to send plain-text fallback message to Telegram: {err}");
+                    None
+                }
+            }
+        } else {
+            match self
+                .bot
+                .send_message(self.chat_id, text.to_string())
+                .message_thread_id(ThreadId(MessageId(self.thread_id)))
+                .parse_mode(ParseMode::Html)
+                .disable_notification(silent)
+                .await
+            {
+                Ok(message) => Some(message),
+                Err(err) => {
+                    sess_warn!("Failed to send HTML message to Telegram: {err}");
+                    None
+                }
             }
         }
     }
@@ -121,19 +140,31 @@ impl EventContext {
     }
 
     pub async fn edit_html(&mut self, msg_id: MessageId, text: &str) -> bool {
-        let text = Self::truncate_html(text);
-
         self.throttle.wait_turn().await;
-        match self
-            .bot
-            .edit_message_text(self.chat_id, msg_id, text)
-            .parse_mode(ParseMode::Html)
-            .await
-        {
-            Ok(_) => true,
-            Err(err) => {
-                sess_warn!("Failed to edit Telegram message {}: {}", msg_id.0, err);
-                false
+        if let Some(text) = Self::html_fallback_text(text) {
+            match self.bot.edit_message_text(self.chat_id, msg_id, text).await {
+                Ok(_) => true,
+                Err(err) => {
+                    sess_warn!(
+                        "Failed to edit Telegram message {} with plain-text fallback: {}",
+                        msg_id.0,
+                        err
+                    );
+                    false
+                }
+            }
+        } else {
+            match self
+                .bot
+                .edit_message_text(self.chat_id, msg_id, text.to_string())
+                .parse_mode(ParseMode::Html)
+                .await
+            {
+                Ok(_) => true,
+                Err(err) => {
+                    sess_warn!("Failed to edit Telegram message {}: {}", msg_id.0, err);
+                    false
+                }
             }
         }
     }

@@ -71,7 +71,8 @@ pub fn format_tool_result(
     output: Option<&str>,
     details: Option<&str>,
 ) -> String {
-    format_tool_message(name, kind, status, details.or(output), 3900)
+    let body = details.or(output).map(|text| truncate_message_tail(text, 1000));
+    format_tool_message(name, kind, status, body.as_deref(), 1000)
 }
 
 /// Format a completion message (HTML).
@@ -108,11 +109,14 @@ pub fn format_plan(plan: &acp::Plan) -> String {
         .unwrap_or("Plan");
 
     let mut lines = Vec::with_capacity(entries.len() + 2);
-    lines.push(format!("<b>Progress: {}</b>", escape_html(title)));
+    lines.push(format!(
+        "<b>Progress: {}</b>",
+        escape_html(&truncate_message(title, 500))
+    ));
     lines.push(String::new());
 
     for (idx, entry) in entries.iter().enumerate() {
-        let content = escape_html(&entry.content);
+        let content = escape_html(&truncate_message(&entry.content, 500));
         let line = match entry.status {
             acp::PlanEntryStatus::Pending => format!("{}. ⏳ {}", idx + 1, content),
             acp::PlanEntryStatus::InProgress => format!("{}. 🚧 {}", idx + 1, content),
@@ -122,7 +126,7 @@ pub fn format_plan(plan: &acp::Plan) -> String {
         lines.push(line);
     }
 
-    truncate_message(&lines.join("\n"), 4096)
+    lines.join("\n")
 }
 
 /// Format a completed plan message (HTML).
@@ -131,9 +135,13 @@ pub fn format_plan_completed(plan: &acp::Plan) -> String {
     lines.push("✅ Plan completed".to_string());
     lines.push(String::new());
     for (idx, entry) in plan.entries.iter().enumerate() {
-        lines.push(format!("{}. ✅ {}", idx + 1, escape_html(&entry.content)));
+        lines.push(format!(
+            "{}. ✅ {}",
+            idx + 1,
+            escape_html(&truncate_message(&entry.content, 500))
+        ));
     }
-    truncate_message(&lines.join("\n"), 4096)
+    lines.join("\n")
 }
 
 /// Format available agent slash commands (HTML).
@@ -186,6 +194,7 @@ fn format_tool_header_html(
     kind: acp::ToolKind,
     status: acp::ToolCallStatus,
 ) -> String {
+    let truncated_name = truncate_message(name, 500);
     let status_icon = match status {
         acp::ToolCallStatus::Pending => "⏳",
         acp::ToolCallStatus::InProgress => "🚧",
@@ -205,13 +214,16 @@ fn format_tool_header_html(
         acp::ToolKind::Other => "🛠️",
         _ => "🛠️",
     };
-    match name.split_once('\n') {
+    match truncated_name.split_once('\n') {
         Some((first_line, remaining)) if !remaining.trim().is_empty() => format!(
             "{status_icon} {kind_icon} <b>Tool:</b> {}\n{}",
             escape_html(first_line),
-            format_collapsible_block_html(remaining, 1200)
+            format_collapsible_block_html(remaining, 1000)
         ),
-        _ => format!("{status_icon} {kind_icon} <b>Tool:</b> {}", escape_html(name)),
+        _ => format!(
+            "{status_icon} {kind_icon} <b>Tool:</b> {}",
+            escape_html(&truncated_name)
+        ),
     }
 }
 
@@ -226,6 +238,19 @@ pub fn truncate_message(text: &str, max_len: usize) -> String {
         // Find a safe char boundary
         let cut = text.floor_char_boundary(cut);
         format!("{}{}", &text[..cut], suffix)
+    }
+}
+
+/// Truncate a message to keep the tail within a maximum length.
+/// If truncated, prepends "[truncated]…".
+pub fn truncate_message_tail(text: &str, max_len: usize) -> String {
+    if text.len() <= max_len {
+        text.to_string()
+    } else {
+        let prefix = "[truncated]…";
+        let keep = max_len.saturating_sub(prefix.len());
+        let start = text.ceil_char_boundary(text.len().saturating_sub(keep));
+        format!("{}{}", prefix, &text[start..])
     }
 }
 
@@ -258,7 +283,9 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_available_commands_html, format_tool_call, markdown_to_telegram_md_v2};
+    use super::{
+        format_available_commands_html, format_tool_call, markdown_to_telegram_md_v2,
+    };
     use agent_client_protocol as acp;
 
     #[test]
@@ -273,7 +300,7 @@ mod tests {
             acp::AvailableCommandInput::Unstructured(acp::UnstructuredCommandInput::new("query")),
         );
         let text = format_available_commands_html(&[cmd]);
-        assert!(text.contains("/search"));
+        assert!(text.contains("/<code>search</code>"));
         assert!(text.contains("Search the codebase"));
         assert!(text.contains("input: query"));
     }
@@ -340,5 +367,30 @@ mod tests {
 
         assert!(text.len() <= 4096);
         assert!(text.contains("[truncated]"));
+    }
+
+    #[test]
+    fn truncates_tool_name_before_html_formatting() {
+        let name = format!("{}\n{}", "a".repeat(600), "b".repeat(2000));
+        let text = format_tool_call(
+            &name,
+            acp::ToolKind::Execute,
+            acp::ToolCallStatus::InProgress,
+            None,
+        );
+
+        assert!(text.contains("<b>Tool:</b>"));
+        assert!(text.contains("…[truncated]"));
+        assert!(text.contains("</blockquote>") || !text.contains("<blockquote"));
+    }
+
+    #[test]
+    fn truncates_available_commands_without_breaking_html() {
+        let cmd = acp::AvailableCommand::new("x".repeat(600), "<tag>".repeat(1200));
+        let text = format_available_commands_html(&[cmd]);
+
+        assert!(text.contains("/<code>"));
+        assert!(text.contains("</code>"));
+        assert!(!text.contains("<tag>"));
     }
 }
