@@ -109,6 +109,29 @@ impl EventContext {
         }
     }
 
+    async fn request_with_throttle_drop<T, F, Fut>(&mut self, label: &str, mut request: F) -> Result<Option<T>, RequestError>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T, RequestError>>,
+    {
+        if !self.throttle.try_turn() {
+            return Ok(None);
+        }
+        match request().await {
+            Ok(value) => Ok(Some(value)),
+            Err(RequestError::RetryAfter(after)) => {
+                let delay = after.duration() + Self::RETRY_AFTER_PADDING;
+                self.throttle.defer_for(delay);
+                sess_warn!(
+                    "Telegram rate limit while {label}; backing off for {}s (dropping update)",
+                    delay.as_secs()
+                );
+                Ok(None)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     pub async fn send_html(&mut self, text: &str, silent: bool) -> Option<Message> {
         if let Some(text) = Self::html_fallback_text(text) {
             let bot = self.bot.clone();
@@ -139,6 +162,46 @@ impl EventContext {
                     .send()
             }).await {
                 Ok(message) => Some(message),
+                Err(err) => {
+                    sess_warn!("Failed to send HTML message to Telegram: {err}");
+                    None
+                }
+            }
+        }
+    }
+
+    pub async fn send_html_drop(&mut self, text: &str, silent: bool) -> Option<Message> {
+        if let Some(text) = Self::html_fallback_text(text) {
+            let bot = self.bot.clone();
+            let chat_id = self.chat_id;
+            let thread_id = self.thread_id;
+            match self.request_with_throttle_drop("sending plain-text fallback message to Telegram", move || {
+                bot.send_message(chat_id, text.clone())
+                    .message_thread_id(ThreadId(MessageId(thread_id)))
+                    .disable_notification(silent)
+                    .send()
+            }).await {
+                Ok(Some(message)) => Some(message),
+                Ok(None) => None,
+                Err(err) => {
+                    sess_warn!("Failed to send plain-text fallback message to Telegram: {err}");
+                    None
+                }
+            }
+        } else {
+            let bot = self.bot.clone();
+            let chat_id = self.chat_id;
+            let thread_id = self.thread_id;
+            let text = text.to_string();
+            match self.request_with_throttle_drop("sending HTML message to Telegram", move || {
+                bot.send_message(chat_id, text.clone())
+                    .message_thread_id(ThreadId(MessageId(thread_id)))
+                    .parse_mode(ParseMode::Html)
+                    .disable_notification(silent)
+                    .send()
+            }).await {
+                Ok(Some(message)) => Some(message),
+                Ok(None) => None,
                 Err(err) => {
                     sess_warn!("Failed to send HTML message to Telegram: {err}");
                     None
@@ -219,6 +282,50 @@ impl EventContext {
                 .await
             {
                 Ok(_) => true,
+                Err(err) => {
+                    sess_warn!("Failed to edit Telegram message {}: {}", msg_id.0, err);
+                    false
+                }
+            }
+        }
+    }
+
+    pub async fn edit_html_drop(&mut self, msg_id: MessageId, text: &str) -> bool {
+        if let Some(text) = Self::html_fallback_text(text) {
+            let bot = self.bot.clone();
+            let chat_id = self.chat_id;
+            match self
+                .request_with_throttle_drop(
+                    &format!("editing Telegram message {} with plain-text fallback", msg_id.0),
+                    move || bot.edit_message_text(chat_id, msg_id, text.clone()).send(),
+                )
+                .await
+            {
+                Ok(Some(_)) => true,
+                Ok(None) => false,
+                Err(err) => {
+                    sess_warn!(
+                        "Failed to edit Telegram message {} with plain-text fallback: {}",
+                        msg_id.0,
+                        err
+                    );
+                    false
+                }
+            }
+        } else {
+            let bot = self.bot.clone();
+            let chat_id = self.chat_id;
+            let text = text.to_string();
+            match self
+                .request_with_throttle_drop(&format!("editing Telegram message {}", msg_id.0), move || {
+                    bot.edit_message_text(chat_id, msg_id, text.clone())
+                        .parse_mode(ParseMode::Html)
+                        .send()
+                })
+                .await
+            {
+                Ok(Some(_)) => true,
+                Ok(None) => false,
                 Err(err) => {
                     sess_warn!("Failed to edit Telegram message {}: {}", msg_id.0, err);
                     false
