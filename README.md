@@ -7,39 +7,42 @@
 | ![photo_1_2026-03-14_01-08-15](https://github.com/user-attachments/assets/e84143a7-58ac-4927-991f-b9cbb772aae2) | ![photo_2_2026-03-14_01-08-15](https://github.com/user-attachments/assets/18346bb9-39a9-4199-b206-e3fe7135e42b) | ![photo_2026-03-14_01-13-09](https://github.com/user-attachments/assets/53ac0332-0ca7-4683-bb36-f0d49e84f0a0) |
 | **Talking with agent.** <br/> Handle multiple sessions with tabs and threads. | **Uploading artifacts.** <br/>Use telegraph to view your markdown files, or let it upload images or files. | **Slash commands.** <br/>Manage your sessions with ease, set models and permissions, or use agent's commands. |
 
-## What you get
+## Features
 
-- Get notifications and view real-time progress on your phone
-- Give new tasks to agent even you're away from computer
-- Works with any agent that supports [ACP](https://agentclientprotocol.com/). This is almost any agent, including claude code, codex, opencode and cursor.
-- Handle multiple sessions simutaniously, in different telegram tabs
+- Get **notifications** and view **real-time progress** on your phone
+- **Give new tasks** to agent even you're away from computer
+- Works with **any agent** that supports [ACP](https://agentclientprotocol.com/). This is almost any agent, including claude code, codex, opencode and cursor.
+- Handle **multiple sessions** simutaniously, in different telegram tabs
 
-# Instalation
+# Installation
 
-todo: Setup cargo-binstall
-todo: Package with nix
+**Method 1**: Use cargo binstall (not recommended)
 
-# Hacking
+`cargo binstall` requires me to manually bump version numbers and do a release, and there's no way to upload a binary on push.
+Therefore, the version on `binstall` can be quite old.
 
-## How it works
-
-```text
-CLI ──(Unix socket IPC)──> Daemon ──> ACP Agent subprocesses (stdin/stdout)
-                              │
-                              └──> Telegram Bot API (topics, messages)
+```bash
+cargo binstall telegram-acp
+telegram-acp
 ```
 
-Per session:
+**Method 2**: Use via nix
 
-1. Creates/uses a Telegram forum topic (or threaded private chat topic)
-2. Spawns an ACP agent subprocess
-3. Routes user messages -> agent and agent events -> Telegram
+```bash
+nix run github:SuperKenVery/Telegram-ACP
+```
 
-## Quick start
+**Method 3**: Compile from source
 
-### 1. Configure
+```bash
+git clone https://github.com/SuperKenVery/Telegram-ACP.git
+cd Telegram-ACP
+./dev-loop.fish
+```
 
-On Telegram, use `@botfather` to create a new bot and get your bot token. You should also enable threaded mode in bot settings.
+## Configuration
+
+On Telegram, use `@botfather` to create a new bot and get your bot token. You should also **enable threaded mode in bot settings**.
 
 Create `~/.config/telegram-acp/config.toml`:
 
@@ -65,24 +68,22 @@ Env overrides are also supported:
 - `TELEGRAM_ACP_DEFAULT_AGENT`
 - `TELEGRAM_ACP_TELEGRAPH_AUTHOR`
 
-### 2. Build
+# Hacking
 
-```sh
-cargo build
+## How it works
+
+```text
+CLI ──(Unix socket IPC)──> Daemon ──> ACP Agent subprocesses (stdin/stdout)
+                              │
+                              └──> Telegram Bot API (topics, messages)
 ```
 
-### 3. Run daemon
+Per session:
 
-```sh
-cargo run -- daemon
-```
+1. Creates/uses a Telegram forum topic (or threaded private chat topic)
+2. Spawns an ACP agent subprocess
+3. Routes user messages -> agent and agent events -> Telegram
 
-### 4. Create a session
-
-```sh
-cargo run -- new /path/to/project
-cargo run -- new /path/to/project --agent codex
-```
 
 ## Mock agent testing
 
@@ -101,19 +102,14 @@ default_agent = "mock"
 cmd = "./target/debug/mock_agent"
 ```
 
+Then you can send some ACP updates as text via telegram, and it would send those updates to our daemon.
+
 ## Telegram requirements
 
-- Bot must be added to the target chat
-- For private chats using topics, enable **Threaded Mode** in BotFather
+- Enable **Threaded Mode** in BotFather
 - For supergroups, forum topics should be enabled
 
-## Notes
-
-- IPC uses newline-delimited JSON over a Unix socket
-- Designed for long-running daemon operation
-- Current Telegraph support is present but not fully wired into the runtime flow
-
-## Architecture highlights
+## Some design decisions
 
 - `agent-client-protocol` types are `!Send`, so ACP work is pinned to a `tokio::task::LocalSet`
 - Telegram dispatcher + IPC server run with `tokio::spawn` and communicate through channels
