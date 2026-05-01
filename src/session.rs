@@ -12,8 +12,8 @@ use crate::handlers::plan::PlanHandler;
 use crate::handlers::tool_call::ToolCallHandler;
 use crate::handlers::working::WorkingHandler;
 use crate::handlers::{EventContext, EventHandler};
-use crate::session_log::{self, with_session_context, TranscriptDirection};
 use crate::session_control::{build_control_state, SessionCommand};
+use crate::session_log::{self, with_session_context, TranscriptDirection};
 use crate::types::{AgentEvent, SessionStatus};
 use crate::{sess_error, sess_info, sess_warn};
 
@@ -237,9 +237,7 @@ async fn start_prompt(
                 sess_warn!("Failed to record prompt request: {err}");
             }
         }
-        let prompt_result = conn
-            .prompt(request)
-            .await;
+        let prompt_result = conn.prompt(request).await;
 
         let outcome = match prompt_result {
             Ok(resp) => {
@@ -357,15 +355,13 @@ pub async fn run_event_consumer(
         // Inline: simple events
         match event {
             AgentEvent::Update(acp::SessionUpdate::UsageUpdate(usage)) => {
-                let text = formatting::format_text_message(&format_usage_update(&usage));
-                ctx.send_html_chunks(&text, true).await;
+                // Usage updates are a bit noisy, we don't send it now
+                // let text = formatting::format_text_message(&format_usage_update(&usage));
+                // ctx.send_html_chunks(&text, true).await;
             }
             AgentEvent::Finished(reason) => {
-                ctx.send_html_chunks(
-                    &formatting::format_completion(&reason, None),
-                    false,
-                )
-                .await;
+                ctx.send_html_chunks(&formatting::format_completion(&reason, None), false)
+                    .await;
                 tool_call.reset(&mut ctx).await;
             }
             AgentEvent::Error(e) => {
