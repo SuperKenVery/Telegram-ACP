@@ -30,19 +30,19 @@ impl Command for StatusCommand {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No active session in this topic"))?;
 
-        let agent_name = active
-            .agent_name
-            .as_deref()
-            .unwrap_or("unknown");
+        let agent_name = active.agent_name.as_deref().unwrap_or("unknown");
         let agent_command = &active.agent_command;
         let working_dir = active.project_path.display();
+
+        let log_dir = active.session_log.log_dir().display().to_string();
 
         let status_text = format!(
             "<b>Session Status</b>\n\n\
             <b>Agent:</b> {}\n\
             <b>Command:</b> <code>{}</code>\n\
-            <b>Working Directory:</b> <code>{}</code>",
-            agent_name, agent_command, working_dir
+            <b>Working Directory:</b> <code>{}</code>\n\
+            <b>Log Directory:</b> <code>{}</code>",
+            agent_name, agent_command, working_dir, log_dir
         );
 
         ctx.bot

@@ -137,6 +137,10 @@ impl SessionLog {
         self.agent_stderr_path.clone()
     }
 
+    pub fn log_dir(&self) -> PathBuf {
+        lock_mutex(&self.meta).log_dir.clone()
+    }
+
     pub fn set_acp_session_id(&self, acp_session_id: impl Into<String>) -> Result<()> {
         let mut meta = lock_mutex(&self.meta);
         meta.acp_session_id = Some(acp_session_id.into());
