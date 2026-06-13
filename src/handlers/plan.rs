@@ -27,7 +27,7 @@ impl EventHandler for PlanHandler {
             if let Some(old_id) = self.message_id.take() {
                 ctx.delete_msg(old_id).await;
             }
-            ctx.send_html_chunks(&formatting::format_plan_completed(plan), true)
+            ctx.send_markdown_chunks(&formatting::format_plan_completed(plan), true)
                 .await;
             return true;
         }
@@ -36,13 +36,13 @@ impl EventHandler for PlanHandler {
 
         // Try to edit existing plan message
         if let Some(existing_id) = self.message_id {
-            if ctx.edit_html(existing_id, &formatted).await {
+            if ctx.edit_markdown(existing_id, &formatted).await {
                 return true;
             }
         }
 
         // Send new plan message and pin it
-        if let Some(sent) = ctx.send_html(&formatted, true).await {
+        if let Some(sent) = ctx.send_markdown(&formatted, true).await {
             self.message_id = Some(sent.id);
             ctx.pin_msg(sent.id).await;
         }

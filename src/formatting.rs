@@ -6,6 +6,22 @@ pub fn escape_html(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// Escape text inserted into Telegram rich Markdown outside code blocks.
+pub fn escape_markdown_text(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\\' | '`' | '*' | '_' | '{' | '}' | '[' | ']' | '<' | '>' | '(' | ')' | '#' | '+'
+            | '-' | '.' | '!' | '|' => {
+                escaped.push('\\');
+                escaped.push(ch);
+            }
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 /// Format an agent text message for Telegram rich Markdown.
 pub fn format_text_message(text: &str) -> String {
     // Keep model text as Markdown and convert once at send boundary.
@@ -60,17 +76,19 @@ pub fn format_tool_result(
     )
 }
 
-/// Format a completion message (HTML).
+/// Format a completion message as rich Markdown.
 pub fn format_completion(stop_reason: &str) -> String {
-    format!("✓ <b>Done</b> ({})", escape_html(stop_reason))
+    format!("✓ **Done** ({})", escape_markdown_text(stop_reason))
 }
 
-/// Format an error message (HTML).
+/// Format an error message as rich Markdown.
 pub fn format_error(error: &str) -> String {
-    format!("❌ <b>Error:</b> {}", escape_html(error))
+    let error = truncate_message(error, 32_000);
+    let fence = code_fence_for(&error);
+    format!("❌ **Error:**\n\n{fence}\n{error}\n{fence}")
 }
 
-/// Format a plan message (HTML).
+/// Format a plan message as rich Markdown.
 pub fn format_plan(plan: &acp::Plan) -> String {
     let mut entries: Vec<_> = plan.entries.iter().collect();
     entries.sort_by_key(|entry| match entry.status {
@@ -87,14 +105,11 @@ pub fn format_plan(plan: &acp::Plan) -> String {
         .unwrap_or("Plan");
 
     let mut lines = Vec::with_capacity(entries.len() + 2);
-    lines.push(format!(
-        "<b>Progress: {}</b>",
-        escape_html(&truncate_message(title, 500))
-    ));
+    lines.push(format!("**Progress: {}**", truncate_message(title, 500)));
     lines.push(String::new());
 
     for (idx, entry) in entries.iter().enumerate() {
-        let content = escape_html(&truncate_message(&entry.content, 500));
+        let content = truncate_message(&entry.content, 500);
         let line = match entry.status {
             acp::PlanEntryStatus::Pending => format!("{}. ⏳ {}", idx + 1, content),
             acp::PlanEntryStatus::InProgress => format!("{}. 🚧 {}", idx + 1, content),
@@ -107,7 +122,7 @@ pub fn format_plan(plan: &acp::Plan) -> String {
     lines.join("\n")
 }
 
-/// Format a completed plan message (HTML).
+/// Format a completed plan message as rich Markdown.
 pub fn format_plan_completed(plan: &acp::Plan) -> String {
     let mut lines = Vec::with_capacity(plan.entries.len() + 2);
     lines.push("✅ Plan completed".to_string());
@@ -116,7 +131,7 @@ pub fn format_plan_completed(plan: &acp::Plan) -> String {
         lines.push(format!(
             "{}. ✅ {}",
             idx + 1,
-            escape_html(&truncate_message(&entry.content, 500))
+            escape_markdown_text(&truncate_message(&entry.content, 500))
         ));
     }
     lines.join("\n")
@@ -382,6 +397,40 @@ cargo test
             "```diff
 --- a/keymap.json"
         ));
+    }
+
+    #[test]
+    fn formats_completion_and_error_as_markdown() {
+        assert_eq!(
+            super::format_completion("end_turn"),
+            "✓ **Done** (end_turn)"
+        );
+        assert_eq!(
+            super::format_error("bad <tag> *boom*"),
+            "❌ **Error:**\n\n```\nbad <tag> *boom*\n```"
+        );
+    }
+
+    #[test]
+    fn formats_plan_as_markdown() {
+        let plan = acp::Plan::new(vec![
+            acp::PlanEntry::new(
+                "Run *tests*",
+                acp::PlanEntryPriority::Medium,
+                acp::PlanEntryStatus::InProgress,
+            ),
+            acp::PlanEntry::new(
+                "Ship <fix>",
+                acp::PlanEntryPriority::Medium,
+                acp::PlanEntryStatus::Pending,
+            ),
+        ]);
+        let text = super::format_plan(&plan);
+
+        assert!(text.contains("**Progress: Run *tests***"));
+        assert!(text.contains("1. 🚧 Run *tests*"));
+        assert!(text.contains("2. ⏳ Ship <fix>"));
+        assert!(!text.contains("<b>"));
     }
 
     #[test]

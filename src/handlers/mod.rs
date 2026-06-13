@@ -149,7 +149,7 @@ impl EventContext {
         }
     }
 
-    pub async fn send_html(&mut self, text: &str, silent: bool) -> Option<Message> {
+    pub async fn send_markdown(&mut self, text: &str, silent: bool) -> Option<Message> {
         let bot = self.bot.clone();
         let chat_id = self.chat_id;
         let thread_id = self.thread_id;
@@ -172,7 +172,7 @@ impl EventContext {
         }
     }
 
-    pub async fn send_html_drop(&mut self, text: &str, silent: bool) -> Option<Message> {
+    pub async fn send_markdown_drop(&mut self, text: &str, silent: bool) -> Option<Message> {
         let bot = self.bot.clone();
         let chat_id = self.chat_id;
         let thread_id = self.thread_id;
@@ -196,19 +196,13 @@ impl EventContext {
         }
     }
 
-    pub async fn send_html_chunks(&mut self, text: &str, silent: bool) {
+    pub async fn send_markdown_chunks(&mut self, text: &str, silent: bool) {
         for chunk in formatting::split_message(text, 32_768) {
-            let _ = self.send_html(&chunk, silent).await;
+            let _ = self.send_markdown(&chunk, silent).await;
         }
     }
 
-    pub async fn send_chunks(&mut self, text: &str, silent: bool) {
-        for chunk in formatting::split_message(text, 32_768) {
-            let _ = self.send_html(&chunk, silent).await;
-        }
-    }
-
-    pub async fn edit_html(&mut self, msg_id: MessageId, text: &str) -> bool {
+    pub async fn edit_markdown(&mut self, msg_id: MessageId, text: &str) -> bool {
         let bot = self.bot.clone();
         let chat_id = self.chat_id;
         let text = text.to_string();
@@ -231,7 +225,7 @@ impl EventContext {
         }
     }
 
-    pub async fn edit_html_drop(&mut self, msg_id: MessageId, text: &str) -> bool {
+    pub async fn edit_markdown_drop(&mut self, msg_id: MessageId, text: &str) -> bool {
         let bot = self.bot.clone();
         let chat_id = self.chat_id;
         let text = text.to_string();
@@ -253,6 +247,10 @@ impl EventContext {
                 false
             }
         }
+    }
+
+    pub async fn send_chunks(&mut self, text: &str, silent: bool) {
+        self.send_markdown_chunks(text, silent).await;
     }
 
     pub async fn delete_msg(&mut self, msg_id: MessageId) {

@@ -357,15 +357,15 @@ pub async fn run_event_consumer(
             AgentEvent::Update(acp::SessionUpdate::UsageUpdate(usage)) => {
                 // Usage updates are a bit noisy, we don't send it now
                 // let text = formatting::format_text_message(&format_usage_update(&usage));
-                // ctx.send_html_chunks(&text, true).await;
+                // ctx.send_markdown_chunks(&text, true).await;
             }
             AgentEvent::Finished(reason) => {
-                ctx.send_html_chunks(&formatting::format_completion(&reason), false)
+                ctx.send_markdown_chunks(&formatting::format_completion(&reason), false)
                     .await;
                 tool_call.reset(&mut ctx).await;
             }
             AgentEvent::Error(e) => {
-                ctx.send_html_chunks(&formatting::format_error(&e), false)
+                ctx.send_markdown_chunks(&formatting::format_error(&e), false)
                     .await;
                 tool_call.reset(&mut ctx).await;
             }

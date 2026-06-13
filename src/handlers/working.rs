@@ -18,7 +18,7 @@ impl WorkingHandler {
         if !matches!(event, AgentEvent::Working) {
             return false;
         }
-        if let Some(sent) = ctx.send_html("⏳ <i>Working on it...</i>", true).await {
+        if let Some(sent) = ctx.send_markdown("⏳ _Working on it..._", true).await {
             self.msg_id = Some(sent.id);
         }
         true
