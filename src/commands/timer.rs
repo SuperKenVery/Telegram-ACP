@@ -37,7 +37,10 @@ impl Command for TimerCommand {
         tokio::spawn(async move {
             for _ in 0..repeat {
                 sleep(interval).await;
-                if command_tx.send(SessionCommand::Prompt(prompt.clone())).is_err() {
+                if command_tx
+                    .send(SessionCommand::Prompt(prompt.clone()))
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -98,9 +101,9 @@ fn parse_timer_args(args: &str) -> Result<TimerArgs> {
             if repeat.is_some() {
                 anyhow::bail!("Repeat specified more than once");
             }
-            let parsed = value.parse::<usize>().map_err(|_| {
-                anyhow!("Repeat must be a number between 1 and {MAX_REPEAT}")
-            })?;
+            let parsed = value
+                .parse::<usize>()
+                .map_err(|_| anyhow!("Repeat must be a number between 1 and {MAX_REPEAT}"))?;
             repeat = Some(parsed);
             continue;
         }
@@ -161,9 +164,9 @@ fn parse_interval(raw: &str) -> Result<Duration> {
             anyhow::bail!("Interval must be like 10m, 2h, or 2h30m");
         }
 
-        let value = number.parse::<u64>().map_err(|_| {
-            anyhow!("Interval must be like 10m, 2h, or 2h30m")
-        })?;
+        let value = number
+            .parse::<u64>()
+            .map_err(|_| anyhow!("Interval must be like 10m, 2h, or 2h30m"))?;
         number.clear();
 
         match ch {

@@ -57,7 +57,7 @@ impl ToolCallHandler {
         let status = tool_call.status;
         let details = extract_tool_diff(&tool_call.content);
         if let Some(sent) = ctx
-            .send_html_drop(
+            .send_markdown(
                 &formatting::format_tool_call(&name, kind, status, details.as_deref()),
                 true,
             )
@@ -120,7 +120,7 @@ impl ToolCallHandler {
         );
 
         if let Some(state) = self.messages.get_mut(&id) {
-            ctx.edit_html_drop(state.msg_id, &text).await;
+            ctx.edit_markdown(state.msg_id, &text).await;
             if !name.is_empty() {
                 state.name = name;
             }
@@ -136,7 +136,7 @@ impl ToolCallHandler {
             return;
         }
 
-        if let Some(sent) = ctx.send_html_drop(&text, true).await {
+        if let Some(sent) = ctx.send_markdown(&text, true).await {
             self.messages.insert(
                 id,
                 ToolCallMessageState {

@@ -26,7 +26,7 @@ src/
   session.rs       Prompt loop: receives user text, sends PromptRequest to agent.
   acp.rs           ACP Client trait impl (TelegramClient), subprocess spawning, session init.
   telegram.rs      Teloxide bot dispatcher, /new command, topic message routing, event consumer.
-  telegraph.rs     Telegraph account creation and page publishing (for code diffs).
+  telegram_rich.rs Telegram RichMessage API helpers for rich Markdown sends, edits, and drafts.
   ipc.rs           Unix socket server (daemon) and client (CLI). Newline-delimited JSON.
   types.rs         Shared types: DaemonCommand, DaemonResponse, SessionInfo, AgentEvent.
   formatting.rs    Telegram HTML formatting, escaping, message splitting/truncation.
@@ -69,10 +69,9 @@ cmd = "claude-agent-acp"
 [codex]
 cmd = "codex --acp"
 # socket_path = "/tmp/telegram-acp.sock"
-# telegraph_author = "Your Name"
 ```
 
-Env var overrides: `TELEGRAM_ACP_BOT_TOKEN`, `TELEGRAM_ACP_CHAT_ID`, `TELEGRAM_ACP_SOCKET_PATH`, `TELEGRAM_ACP_DEFAULT_AGENT`, `TELEGRAM_ACP_TELEGRAPH_AUTHOR`.
+Env var overrides: `TELEGRAM_ACP_BOT_TOKEN`, `TELEGRAM_ACP_CHAT_ID`, `TELEGRAM_ACP_SOCKET_PATH`, `TELEGRAM_ACP_DEFAULT_AGENT`.
 
 The bot must have **Threaded Mode** enabled in BotFather settings for private chat topics.
 

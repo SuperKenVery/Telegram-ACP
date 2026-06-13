@@ -45,7 +45,10 @@ pub fn load_topics() -> Vec<PersistedTopic> {
 
     // Fall back to legacy Vec<SessionInfo> format
     if let Ok(sessions) = serde_json::from_str::<Vec<SessionInfo>>(&data) {
-        tracing::info!("Migrating {} legacy session(s) to topic format", sessions.len());
+        tracing::info!(
+            "Migrating {} legacy session(s) to topic format",
+            sessions.len()
+        );
         return sessions
             .into_iter()
             .map(|s| {

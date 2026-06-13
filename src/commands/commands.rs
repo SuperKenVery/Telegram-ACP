@@ -21,11 +21,7 @@ impl Command for CommandsCommand {
 
     async fn execute(&self, ctx: CommandContext<'_>) -> Result<()> {
         let thread_id = ctx.require_thread_id()?;
-        let Some(commands) = ctx
-            .daemon
-            .get_available_commands_by_thread(thread_id)
-            .await
-        else {
+        let Some(commands) = ctx.daemon.get_available_commands_by_thread(thread_id).await else {
             ctx.bot
                 .send_message(ctx.msg.chat.id, "No active session in this topic.")
                 .message_thread_id(ThreadId(MessageId(thread_id)))
