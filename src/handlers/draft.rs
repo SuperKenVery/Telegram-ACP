@@ -73,9 +73,10 @@ impl DraftHandler {
         d.text.push_str(text);
         if let Err(e) = send_streaming_draft(ctx, d.draft_id, &d.text).await {
             sess_warn!(
-                "Draft message update failed ({} bytes): {}",
+                "Draft message update failed ({} bytes): {}, msg={}",
                 d.text.len(),
-                e
+                e,
+                &d.text
             );
         }
     }
