@@ -7,9 +7,6 @@ use std::path::PathBuf;
 pub struct Config {
     pub bot_token: String,
     pub chat_id: i64,
-    pub telegraph_author: Option<String>,
-    #[allow(dead_code)]
-    pub telegraph_author_url: Option<String>,
     pub socket_path: PathBuf,
     pub default_agent: String,
     pub agents: HashMap<String, String>,
@@ -19,8 +16,6 @@ pub struct Config {
 struct FileConfig {
     bot_token: Option<String>,
     chat_id: Option<i64>,
-    telegraph_author: Option<String>,
-    telegraph_author_url: Option<String>,
     socket_path: Option<PathBuf>,
     default_agent: Option<String>,
     #[serde(flatten)]
@@ -73,20 +68,9 @@ impl Config {
             .context("default_agent is required (set TELEGRAM_ACP_DEFAULT_AGENT or config file)")?;
         ensure_agent_exists(&default_agent, &agents)?;
 
-        let telegraph_author = env_or(
-            "TELEGRAM_ACP_TELEGRAPH_AUTHOR",
-            file_config.telegraph_author,
-        );
-        let telegraph_author_url = env_or(
-            "TELEGRAM_ACP_TELEGRAPH_AUTHOR_URL",
-            file_config.telegraph_author_url,
-        );
-
         Ok(Config {
             bot_token,
             chat_id,
-            telegraph_author,
-            telegraph_author_url,
             socket_path,
             default_agent,
             agents,
@@ -104,11 +88,10 @@ impl Config {
             .filter(|v| !v.is_empty())
             .unwrap_or(&self.default_agent);
 
-        let command = self
-            .agents
-            .get(selected_agent)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!(unknown_agent_message(selected_agent, &self.agents)))?;
+        let command =
+            self.agents.get(selected_agent).cloned().ok_or_else(|| {
+                anyhow::anyhow!(unknown_agent_message(selected_agent, &self.agents))
+            })?;
 
         Ok((selected_agent.to_string(), command))
     }

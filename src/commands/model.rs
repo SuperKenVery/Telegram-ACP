@@ -43,26 +43,18 @@ impl Command for ModelCommand {
                     let model_name = updated
                         .model_selector
                         .as_ref()
-                        .and_then(|s| {
-                            s.options.iter().find(|opt| opt.id == s.current_value_id)
-                        })
+                        .and_then(|s| s.options.iter().find(|opt| opt.id == s.current_value_id))
                         .map(|opt| opt.name.clone())
                         .unwrap_or_else(|| arg.to_string());
 
                     ctx.bot
-                        .send_message(
-                            ctx.msg.chat.id,
-                            format!("Model set to {model_name}."),
-                        )
+                        .send_message(ctx.msg.chat.id, format!("Model set to {model_name}."))
                         .message_thread_id(ThreadId(MessageId(thread_id)))
                         .await?;
                 }
                 Err(e) => {
                     ctx.bot
-                        .send_message(
-                            ctx.msg.chat.id,
-                            format!("Failed to set model: {e}"),
-                        )
+                        .send_message(ctx.msg.chat.id, format!("Failed to set model: {e}"))
                         .message_thread_id(ThreadId(MessageId(thread_id)))
                         .await?;
                 }

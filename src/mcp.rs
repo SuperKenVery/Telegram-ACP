@@ -12,18 +12,14 @@ use rmcp::{tool, tool_handler, tool_router, RoleServer, ServerHandler, ServiceEx
 use schemars::JsonSchema;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::{InputFile, MessageId, ThreadId};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::telegraph;
-
 #[derive(Clone)]
 struct McpServer {
     bot: Bot,
-    telegraph: Arc<telegraph_rs::Telegraph>,
     chat_id: ChatId,
     thread_id: i32,
     project_path: PathBuf,
@@ -53,36 +49,28 @@ struct UploadImageArgs {
 
 #[tool_router]
 impl McpServer {
-    /// Render Markdown file to Telegraph and send link to the user
+    /// Upload a Markdown file to Telegram
     #[tool]
     async fn upload_markdown(
         &self,
         Parameters(args): Parameters<UploadMarkdownArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let resolved = resolve_path(&self.project_path, &args.path);
-        let markdown = tokio::fs::read_to_string(&resolved)
-            .await
-            .map_err(|e| ErrorData::new(ErrorCode::INVALID_PARAMS, e.to_string(), None))?;
-        let title = args.title.unwrap_or_else(|| "Markdown Upload".to_string());
-        let url = telegraph::create_markdown_post(&self.telegraph, &title, &markdown)
+        let (input, filename) = build_input_file(&self.project_path, &args.path)?;
+        let thread_id = ThreadId(MessageId(self.thread_id));
+        let mut request = self
+            .bot
+            .send_document(self.chat_id, input)
+            .message_thread_id(thread_id);
+        if let Some(title) = args.title {
+            request = request.caption(title);
+        }
+        request
             .await
             .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None))?;
 
-        let thread_id = ThreadId(MessageId(self.thread_id));
-        if let Err(e) = self
-            .bot
-            .send_message(self.chat_id, format!("Telegraph: {url}"))
-            .message_thread_id(thread_id)
-            .await
-        {
-            return Err(ErrorData::new(
-                ErrorCode::INTERNAL_ERROR,
-                format!("Failed to send Telegram message: {e}"),
-                None,
-            ));
-        }
-
-        Ok(CallToolResult::success(vec![Content::text(url)]))
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Uploaded Markdown file: {filename}"
+        ))]))
     }
 
     /// Upload a file to Telegram
@@ -149,16 +137,9 @@ impl ServerHandler for McpServer {
 }
 
 impl McpServer {
-    fn new(
-        bot: Bot,
-        telegraph: Arc<telegraph_rs::Telegraph>,
-        chat_id: ChatId,
-        thread_id: i32,
-        project_path: PathBuf,
-    ) -> Self {
+    fn new(bot: Bot, chat_id: ChatId, thread_id: i32, project_path: PathBuf) -> Self {
         Self {
             bot,
-            telegraph,
             chat_id,
             thread_id,
             project_path,
@@ -176,7 +157,6 @@ pub struct McpSession {
 impl McpSession {
     pub async fn new(
         bot: Bot,
-        telegraph: Arc<telegraph_rs::Telegraph>,
         chat_id: ChatId,
         thread_id: i32,
         project_path: PathBuf,
@@ -185,7 +165,7 @@ impl McpSession {
         let (incoming_tx, incoming_rx) = mpsc::unbounded();
         let (outgoing_tx, outgoing_rx) = mpsc::unbounded();
 
-        let server = McpServer::new(bot, telegraph, chat_id, thread_id, project_path);
+        let server = McpServer::new(bot, chat_id, thread_id, project_path);
         let session_id_for_log = id.clone();
         tokio::task::spawn_local(async move {
             tracing::debug!(session_id = %session_id_for_log, "MCP server task started, waiting for initialize");

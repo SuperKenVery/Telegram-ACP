@@ -39,9 +39,9 @@ impl Command for NewCommand {
                 };
 
                 // Default to current session's agent when no agent specified
-                let agent = parsed.agent.or_else(|| {
-                    ctx.daemon.get_session_agent_by_thread(thread_id)
-                });
+                let agent = parsed
+                    .agent
+                    .or_else(|| ctx.daemon.get_session_agent_by_thread(thread_id));
 
                 match ctx
                     .daemon
@@ -61,10 +61,7 @@ impl Command for NewCommand {
                     }
                     Err(e) => {
                         ctx.bot
-                            .send_message(
-                                ctx.msg.chat.id,
-                                format!("Failed to create session: {e}"),
-                            )
+                            .send_message(ctx.msg.chat.id, format!("Failed to create session: {e}"))
                             .message_thread_id(ThreadId(MessageId(thread_id)))
                             .await?;
                     }
@@ -72,9 +69,9 @@ impl Command for NewCommand {
             }
             None => {
                 // No topic: create new topic (requires explicit path)
-                let project_path = parsed
-                    .project_path
-                    .ok_or_else(|| anyhow!("Provide a project path: /new [agent] <project_path>"))?;
+                let project_path = parsed.project_path.ok_or_else(|| {
+                    anyhow!("Provide a project path: /new [agent] <project_path>")
+                })?;
                 let project_path = absolutize_project_path(PathBuf::from(project_path))?;
 
                 match ctx
@@ -98,10 +95,7 @@ impl Command for NewCommand {
                     }
                     Err(e) => {
                         ctx.bot
-                            .send_message(
-                                ctx.msg.chat.id,
-                                format!("Failed to create session: {e}"),
-                            )
+                            .send_message(ctx.msg.chat.id, format!("Failed to create session: {e}"))
                             .await?;
                     }
                 }

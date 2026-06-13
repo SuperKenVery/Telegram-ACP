@@ -10,7 +10,6 @@ use futures::future::join_all;
 use rmcp::service::RxJsonRpcMessage;
 use rmcp::RoleServer;
 use serde_json::Value as JsonValue;
-use telegraph_rs::Telegraph;
 use teloxide::prelude::*;
 use teloxide::types::InputFile;
 use tokio::sync::{mpsc, oneshot};
@@ -21,8 +20,8 @@ use crate::config::Config;
 use crate::mcp;
 use crate::persistence::{self, PersistedTopic};
 use crate::session;
-use crate::session_log::{self, SessionContext, SessionLog, with_session_context};
 use crate::session_control::{self, SessionCommand};
+use crate::session_log::{self, with_session_context, SessionContext, SessionLog};
 use crate::telegram;
 use crate::types::{AgentEvent, SessionRecord, SessionStatus};
 use crate::{sess_error, sess_info};
@@ -31,8 +30,6 @@ use crate::{sess_error, sess_info};
 pub struct DaemonHandle {
     pub config: Config,
     pub bot: Bot,
-    #[allow(dead_code)]
-    pub telegraph: Arc<Telegraph>,
     /// Relay for starting ACP sessions inside the daemon's LocalSet task.
     local_start_tx: mpsc::UnboundedSender<StartSessionRequest>,
     /// thread_id -> TopicEntry
@@ -417,7 +414,6 @@ impl DaemonHandle {
         let mcp_session = Arc::new(
             mcp::McpSession::new(
                 self.bot.clone(),
-                self.telegraph.clone(),
                 ChatId(self.config.chat_id),
                 thread_id,
                 project_path.clone(),
@@ -503,7 +499,9 @@ impl DaemonHandle {
         let acp_session_id = result_rx.await??;
         if let Some(topic) = self.topics.get(&thread_id) {
             if let Some(active) = topic.active.as_ref() {
-                active.session_log.set_acp_session_id(acp_session_id.clone())?;
+                active
+                    .session_log
+                    .set_acp_session_id(acp_session_id.clone())?;
             }
         }
         if let Some(mut topic) = self.topics.get_mut(&thread_id) {
@@ -585,10 +583,7 @@ async fn spawn_and_run_agent(
     .await
     {
         Ok((conn, mut child, bootstrap, session_loading_in_progress)) => {
-            sess_info!(
-                "ACP init completed with session {}",
-                bootstrap.session_id
-            );
+            sess_info!("ACP init completed with session {}", bootstrap.session_id);
             if existing_acp_session_id.is_some() && initiated_via_switch {
                 // On daemon restart, we send nothing
                 let msg = "Switched to the selected session. Replay hidden; ready for new prompts.";
@@ -733,18 +728,18 @@ async fn init_agent(
             mcp_servers,
             &session_log,
         )
-            .await
-            .map_err(|e| {
-                let stderr_tail = acp::format_stderr_tail(&stderr_tail);
-                anyhow::anyhow!(
-                    "ACP resume_session failed (cmd: {}, project: {}, previous_session: {}): {:#}{}",
-                    agent_cmd,
-                    project_path.display(),
-                    old_id,
-                    e,
-                    stderr_tail
-                )
-            })?;
+        .await
+        .map_err(|e| {
+            let stderr_tail = acp::format_stderr_tail(&stderr_tail);
+            anyhow::anyhow!(
+                "ACP resume_session failed (cmd: {}, project: {}, previous_session: {}): {:#}{}",
+                agent_cmd,
+                project_path.display(),
+                old_id,
+                e,
+                stderr_tail
+            )
+        })?;
         session
     } else {
         acp::init_session(&conn, project_path, mcp_servers, &session_log)
@@ -801,14 +796,11 @@ pub async fn run_daemon(config: Config) -> Result<()> {
     tracing::info!("Starting telegram-acp daemon");
 
     let bot = Bot::new(&config.bot_token);
-    let telegraph =
-        Arc::new(crate::telegraph::create_account(config.telegraph_author.as_deref()).await?);
     let (local_start_tx, mut local_start_rx) = mpsc::unbounded_channel::<StartSessionRequest>();
 
     let daemon = Arc::new(DaemonHandle {
         config: config.clone(),
         bot: bot.clone(),
-        telegraph,
         local_start_tx,
         topics: DashMap::new(),
     });

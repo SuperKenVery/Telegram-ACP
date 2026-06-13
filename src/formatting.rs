@@ -1,19 +1,4 @@
 use agent_client_protocol as acp;
-use telegram_markdown_v2::UnsupportedTagsStrategy;
-
-/// MarkdownV2 formatting utilities for Telegram messages.
-
-/// Convert regular Markdown into Telegram MarkdownV2 using Escape strategy for unsupported tags.
-pub fn markdown_to_telegram_md_v2(markdown: &str) -> String {
-    match telegram_markdown_v2::convert_with_strategy(markdown, UnsupportedTagsStrategy::Escape) {
-        Ok(converted) => converted.trim_end_matches('\n').to_string(),
-        Err(e) => {
-            tracing::warn!("telegram_markdown_v2 conversion failed, using escaped fallback: {e}");
-            escape_markdown_v2(markdown)
-        }
-    }
-}
-
 /// Escape text for Telegram HTML parse mode.
 pub fn escape_html(text: &str) -> String {
     text.replace('&', "&amp;")
@@ -21,26 +6,10 @@ pub fn escape_html(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// Escape text for Telegram MarkdownV2 parse mode.
-pub fn escape_markdown_v2(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() * 2);
-    for ch in text.chars() {
-        match ch {
-            '_' | '*' | '[' | ']' | '(' | ')' | '~' | '`' | '>' | '#' | '+' | '-' | '=' | '|'
-            | '{' | '}' | '.' | '!' | '\\' => {
-                out.push('\\');
-                out.push(ch);
-            }
-            _ => out.push(ch),
-        }
-    }
-    out
-}
-
-/// Format an agent text message for Telegram. Truncates to fit within Telegram's 4096 char limit.
+/// Format an agent text message for Telegram rich Markdown.
 pub fn format_text_message(text: &str) -> String {
     // Keep model text as Markdown and convert once at send boundary.
-    truncate_message(text, 4096)
+    truncate_message(text, 32_768)
 }
 
 /// Format a thought/reasoning message for Telegram (HTML).
@@ -71,20 +40,15 @@ pub fn format_tool_result(
     output: Option<&str>,
     details: Option<&str>,
 ) -> String {
-    let body = details.or(output).map(|text| truncate_message_tail(text, 1000));
+    let body = details
+        .or(output)
+        .map(|text| truncate_message_tail(text, 1000));
     format_tool_message(name, kind, status, body.as_deref(), 1000)
 }
 
 /// Format a completion message (HTML).
-pub fn format_completion(stop_reason: &str, telegraph_url: Option<&str>) -> String {
-    let mut msg = format!("✓ <b>Done</b> ({})", escape_html(stop_reason));
-    if let Some(url) = telegraph_url {
-        msg.push_str(&format!(
-            "\n\n📄 <a href=\"{}\">View changes</a>",
-            escape_html(url)
-        ));
-    }
-    msg
+pub fn format_completion(stop_reason: &str) -> String {
+    format!("✓ <b>Done</b> ({})", escape_html(stop_reason))
 }
 
 /// Format an error message (HTML).
@@ -189,11 +153,7 @@ fn format_tool_message(
     sections.join("\n")
 }
 
-fn format_tool_header_html(
-    name: &str,
-    kind: acp::ToolKind,
-    status: acp::ToolCallStatus,
-) -> String {
+fn format_tool_header_html(name: &str, kind: acp::ToolKind, status: acp::ToolCallStatus) -> String {
     let truncated_name = truncate_message(name, 500);
     let status_icon = match status {
         acp::ToolCallStatus::Pending => "⏳",
@@ -283,9 +243,7 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        format_available_commands_html, format_tool_call, markdown_to_telegram_md_v2,
-    };
+    use super::{format_available_commands_html, format_tool_call};
     use agent_client_protocol as acp;
 
     #[test]
@@ -318,14 +276,6 @@ mod tests {
         for chunk in &chunks {
             assert!(chunk.len() <= 100 || chunk.chars().count() > 0);
         }
-    }
-
-    #[test]
-    fn markdown_to_telegram_md_v2_escapes_unsupported_quote_and_pipe() {
-        let input = "> a|b";
-        let out = markdown_to_telegram_md_v2(input);
-        assert!(out.starts_with("\\> "));
-        assert!(out.contains("\\|"));
     }
 
     #[test]

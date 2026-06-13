@@ -9,11 +9,10 @@ mod mcp;
 mod mcp_relay;
 mod persistence;
 mod session;
-mod session_log;
 mod session_control;
+mod session_log;
 mod telegram;
-#[allow(dead_code)]
-mod telegraph;
+mod telegram_rich;
 mod types;
 
 use clap::{Parser, Subcommand};

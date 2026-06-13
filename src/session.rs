@@ -360,7 +360,7 @@ pub async fn run_event_consumer(
                 // ctx.send_html_chunks(&text, true).await;
             }
             AgentEvent::Finished(reason) => {
-                ctx.send_html_chunks(&formatting::format_completion(&reason, None), false)
+                ctx.send_html_chunks(&formatting::format_completion(&reason), false)
                     .await;
                 tool_call.reset(&mut ctx).await;
             }
