@@ -1,10 +1,8 @@
-use agent_client_protocol as acp;
-use teloxide::types::ParseMode;
-
 use super::EventContext;
-use crate::formatting;
-use crate::types::AgentEvent;
 use crate::sess_warn;
+use crate::types::AgentEvent;
+use crate::{formatting, telegram_rich};
+use agent_client_protocol as acp;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DraftKind {
@@ -54,19 +52,11 @@ impl DraftHandler {
             if d.text.is_empty() {
                 return;
             }
-            let (finalized_text, parse_mode) = match d.kind {
-                DraftKind::AgentMessage => {
-                    let formatted = formatting::format_text_message(&d.text);
-                    (
-                        formatting::markdown_to_telegram_md_v2(&formatted),
-                        ParseMode::MarkdownV2,
-                    )
-                }
-                DraftKind::AgentThought => {
-                    (formatting::format_thought_message(&d.text), ParseMode::Html)
-                }
+            let finalized_text = match d.kind {
+                DraftKind::AgentMessage => formatting::format_text_message(&d.text),
+                DraftKind::AgentThought => formatting::format_thought_message(&d.text),
             };
-            ctx.send_chunks(&finalized_text, parse_mode, true).await;
+            ctx.send_chunks(&finalized_text, true).await;
         }
     }
 
@@ -82,12 +72,16 @@ impl DraftHandler {
         });
         d.text.push_str(text);
         if let Err(e) = send_streaming_draft(ctx, d.draft_id, &d.text).await {
-            sess_warn!("Draft message update failed ({} bytes): {}", d.text.len(), e);
+            sess_warn!(
+                "Draft message update failed ({} bytes): {}",
+                d.text.len(),
+                e
+            );
         }
     }
 }
 
-/// Send a streaming draft update via the raw Telegram Bot API (sendMessageDraft).
+/// Send a streaming draft update via the raw Telegram Bot API (sendRichMessageDraft).
 /// Non-blocking: skips if within the throttle window.
 async fn send_streaming_draft(
     ctx: &mut EventContext,
@@ -97,30 +91,9 @@ async fn send_streaming_draft(
     if !ctx.throttle.try_turn() {
         return Ok(());
     }
-    let client = ctx.bot.client();
-    let token = ctx.bot.token();
-    let url = format!("https://api.telegram.org/bot{token}/sendMessageDraft");
-    let telegram_text = formatting::markdown_to_telegram_md_v2(text);
-    let draft_text = formatting::truncate_message(&telegram_text, 4096);
 
-    let mut body = serde_json::json!({
-        "chat_id": ctx.chat_id.0,
-        "draft_id": draft_id,
-        "text": draft_text,
-        "parse_mode": "MarkdownV2",
-    });
-
-    if ctx.thread_id != 0 {
-        body["message_thread_id"] = serde_json::json!(ctx.thread_id);
-    }
-
-    let resp = client.post(&url).json(&body).send().await?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body_text = resp.text().await.unwrap_or_default();
-        anyhow::bail!("sendMessageDraft failed ({status}): {body_text}");
-    }
-    Ok(())
+    telegram_rich::send_rich_markdown_draft(&ctx.bot, ctx.chat_id, ctx.thread_id, draft_id, text)
+        .await
 }
 
 fn extract_text(content: &acp::ContentBlock) -> String {

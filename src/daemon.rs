@@ -10,7 +10,6 @@ use futures::future::join_all;
 use rmcp::service::RxJsonRpcMessage;
 use rmcp::RoleServer;
 use serde_json::Value as JsonValue;
-use telegraph_rs::Telegraph;
 use teloxide::prelude::*;
 use teloxide::types::InputFile;
 use tokio::sync::{mpsc, oneshot};
@@ -31,8 +30,6 @@ use crate::{sess_error, sess_info};
 pub struct DaemonHandle {
     pub config: Config,
     pub bot: Bot,
-    #[allow(dead_code)]
-    pub telegraph: Arc<Telegraph>,
     /// Relay for starting ACP sessions inside the daemon's LocalSet task.
     local_start_tx: mpsc::UnboundedSender<StartSessionRequest>,
     /// thread_id -> TopicEntry
@@ -418,7 +415,6 @@ impl DaemonHandle {
             mcp::McpSession::new(
                 self.bot.clone(),
                 self.clone(),
-                self.telegraph.clone(),
                 ChatId(self.config.chat_id),
                 thread_id,
                 project_path.clone(),
@@ -801,14 +797,11 @@ pub async fn run_daemon(config: Config) -> Result<()> {
     tracing::info!("Starting telegram-acp daemon");
 
     let bot = Bot::new(&config.bot_token);
-    let telegraph =
-        Arc::new(crate::telegraph::create_account(config.telegraph_author.as_deref()).await?);
     let (local_start_tx, mut local_start_rx) = mpsc::unbounded_channel::<StartSessionRequest>();
 
     let daemon = Arc::new(DaemonHandle {
         config: config.clone(),
         bot: bot.clone(),
-        telegraph,
         local_start_tx,
         topics: DashMap::new(),
     });

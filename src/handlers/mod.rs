@@ -8,13 +8,12 @@ pub mod working;
 use std::future::Future;
 
 use teloxide::prelude::*;
-use teloxide::types::{MessageId, ParseMode, ThreadId};
-use teloxide::RequestError;
+use teloxide::types::{MessageId, ThreadId};
 use tokio::time::{sleep_until, Duration, Instant};
 
-use crate::formatting;
 use crate::sess_warn;
 use crate::types::AgentEvent;
+use crate::{formatting, telegram_rich};
 
 // --- OutboundThrottle (moved from session.rs) ---
 
@@ -70,14 +69,6 @@ pub struct EventContext {
 impl EventContext {
     const RETRY_AFTER_PADDING: Duration = Duration::from_secs(1);
 
-    fn html_fallback_text(text: &str) -> Option<String> {
-        if text.len() <= 4096 {
-            None
-        } else {
-            Some(formatting::truncate_message(text, 3900))
-        }
-    }
-
     pub fn new(bot: Bot, chat_id: ChatId, thread_id: i32) -> Self {
         Self {
             bot,
@@ -87,16 +78,29 @@ impl EventContext {
         }
     }
 
-    async fn request_with_throttle<T, F, Fut>(&mut self, label: &str, mut request: F) -> Result<T, RequestError>
+    async fn request_with_throttle<T, F, Fut>(
+        &mut self,
+        label: &str,
+        mut request: F,
+    ) -> anyhow::Result<T>
     where
         F: FnMut() -> Fut,
-        Fut: Future<Output = Result<T, RequestError>>,
+        Fut: Future<Output = anyhow::Result<T>>,
     {
         loop {
             self.throttle.wait_turn().await;
             match request().await {
                 Ok(value) => return Ok(value),
-                Err(RequestError::RetryAfter(after)) => {
+                Err(err)
+                    if err
+                        .downcast_ref::<teloxide::RequestError>()
+                        .is_some_and(|e| matches!(e, teloxide::RequestError::RetryAfter(_))) =>
+                {
+                    let teloxide::RequestError::RetryAfter(after) =
+                        err.downcast_ref::<teloxide::RequestError>().unwrap()
+                    else {
+                        unreachable!()
+                    };
                     let delay = after.duration() + Self::RETRY_AFTER_PADDING;
                     self.throttle.defer_for(delay);
                     sess_warn!(
@@ -109,17 +113,30 @@ impl EventContext {
         }
     }
 
-    async fn request_with_throttle_drop<T, F, Fut>(&mut self, label: &str, mut request: F) -> Result<Option<T>, RequestError>
+    async fn request_with_throttle_drop<T, F, Fut>(
+        &mut self,
+        label: &str,
+        mut request: F,
+    ) -> anyhow::Result<Option<T>>
     where
         F: FnMut() -> Fut,
-        Fut: Future<Output = Result<T, RequestError>>,
+        Fut: Future<Output = anyhow::Result<T>>,
     {
         if !self.throttle.try_turn() {
             return Ok(None);
         }
         match request().await {
             Ok(value) => Ok(Some(value)),
-            Err(RequestError::RetryAfter(after)) => {
+            Err(err)
+                if err
+                    .downcast_ref::<teloxide::RequestError>()
+                    .is_some_and(|e| matches!(e, teloxide::RequestError::RetryAfter(_))) =>
+            {
+                let teloxide::RequestError::RetryAfter(after) =
+                    err.downcast_ref::<teloxide::RequestError>().unwrap()
+                else {
+                    unreachable!()
+                };
                 let delay = after.duration() + Self::RETRY_AFTER_PADDING;
                 self.throttle.defer_for(delay);
                 sess_warn!(
@@ -133,203 +150,107 @@ impl EventContext {
     }
 
     pub async fn send_html(&mut self, text: &str, silent: bool) -> Option<Message> {
-        if let Some(text) = Self::html_fallback_text(text) {
-            let bot = self.bot.clone();
-            let chat_id = self.chat_id;
-            let thread_id = self.thread_id;
-            match self.request_with_throttle("sending plain-text fallback message to Telegram", move || {
-                bot.send_message(chat_id, text.clone())
-                    .message_thread_id(ThreadId(MessageId(thread_id)))
-                    .disable_notification(silent)
-                    .send()
-            }).await {
-                Ok(message) => Some(message),
-                Err(err) => {
-                    sess_warn!("Failed to send plain-text fallback message to Telegram: {err}");
-                    None
+        let bot = self.bot.clone();
+        let chat_id = self.chat_id;
+        let thread_id = self.thread_id;
+        let text = text.to_string();
+        match self
+            .request_with_throttle("sending rich message to Telegram", move || {
+                let bot = bot.clone();
+                let text = text.clone();
+                async move {
+                    telegram_rich::send_rich_markdown(&bot, chat_id, thread_id, &text, silent).await
                 }
-            }
-        } else {
-            let bot = self.bot.clone();
-            let chat_id = self.chat_id;
-            let thread_id = self.thread_id;
-            let text = text.to_string();
-            match self.request_with_throttle("sending HTML message to Telegram", move || {
-                bot.send_message(chat_id, text.clone())
-                    .message_thread_id(ThreadId(MessageId(thread_id)))
-                    .parse_mode(ParseMode::Html)
-                    .disable_notification(silent)
-                    .send()
-            }).await {
-                Ok(message) => Some(message),
-                Err(err) => {
-                    sess_warn!("Failed to send HTML message to Telegram: {err}");
-                    None
-                }
+            })
+            .await
+        {
+            Ok(message) => Some(message),
+            Err(err) => {
+                sess_warn!("Failed to send rich message to Telegram: {err}");
+                None
             }
         }
     }
 
     pub async fn send_html_drop(&mut self, text: &str, silent: bool) -> Option<Message> {
-        if let Some(text) = Self::html_fallback_text(text) {
-            let bot = self.bot.clone();
-            let chat_id = self.chat_id;
-            let thread_id = self.thread_id;
-            match self.request_with_throttle_drop("sending plain-text fallback message to Telegram", move || {
-                bot.send_message(chat_id, text.clone())
-                    .message_thread_id(ThreadId(MessageId(thread_id)))
-                    .disable_notification(silent)
-                    .send()
-            }).await {
-                Ok(Some(message)) => Some(message),
-                Ok(None) => None,
-                Err(err) => {
-                    sess_warn!("Failed to send plain-text fallback message to Telegram: {err}");
-                    None
+        let bot = self.bot.clone();
+        let chat_id = self.chat_id;
+        let thread_id = self.thread_id;
+        let text = text.to_string();
+        match self
+            .request_with_throttle_drop("sending rich message to Telegram", move || {
+                let bot = bot.clone();
+                let text = text.clone();
+                async move {
+                    telegram_rich::send_rich_markdown(&bot, chat_id, thread_id, &text, silent).await
                 }
-            }
-        } else {
-            let bot = self.bot.clone();
-            let chat_id = self.chat_id;
-            let thread_id = self.thread_id;
-            let text = text.to_string();
-            match self.request_with_throttle_drop("sending HTML message to Telegram", move || {
-                bot.send_message(chat_id, text.clone())
-                    .message_thread_id(ThreadId(MessageId(thread_id)))
-                    .parse_mode(ParseMode::Html)
-                    .disable_notification(silent)
-                    .send()
-            }).await {
-                Ok(Some(message)) => Some(message),
-                Ok(None) => None,
-                Err(err) => {
-                    sess_warn!("Failed to send HTML message to Telegram: {err}");
-                    None
-                }
+            })
+            .await
+        {
+            Ok(Some(message)) => Some(message),
+            Ok(None) => None,
+            Err(err) => {
+                sess_warn!("Failed to send rich message to Telegram: {err}");
+                None
             }
         }
     }
 
     pub async fn send_html_chunks(&mut self, text: &str, silent: bool) {
-        let chunks = formatting::split_message(text, 4096);
-        for chunk in chunks {
-            let bot = self.bot.clone();
-            let chat_id = self.chat_id;
-            let thread_id = self.thread_id;
-            let _ = self
-                .request_with_throttle("sending HTML message chunk to Telegram", move || {
-                    bot.send_message(chat_id, chunk.clone())
-                        .message_thread_id(ThreadId(MessageId(thread_id)))
-                        .parse_mode(ParseMode::Html)
-                        .disable_notification(silent)
-                        .send()
-                })
-                .await
-                .map_err(|err| sess_warn!("Failed to send HTML message chunk to Telegram: {err}"));
+        for chunk in formatting::split_message(text, 32_768) {
+            let _ = self.send_html(&chunk, silent).await;
         }
     }
 
-    pub async fn send_chunks(&mut self, text: &str, parse_mode: ParseMode, silent: bool) {
-        let chunks = formatting::split_message(text, 4096);
-        for chunk in chunks {
-            let bot = self.bot.clone();
-            let chat_id = self.chat_id;
-            let thread_id = self.thread_id;
-            let _ = self
-                .request_with_throttle("sending Telegram message chunk", move || {
-                    bot.send_message(chat_id, chunk.clone())
-                        .message_thread_id(ThreadId(MessageId(thread_id)))
-                        .parse_mode(parse_mode)
-                        .disable_notification(silent)
-                        .send()
-                })
-                .await
-                .map_err(|err| sess_warn!("Failed to send Telegram message chunk: {err}"));
+    pub async fn send_chunks(&mut self, text: &str, silent: bool) {
+        for chunk in formatting::split_message(text, 32_768) {
+            let _ = self.send_html(&chunk, silent).await;
         }
     }
 
     pub async fn edit_html(&mut self, msg_id: MessageId, text: &str) -> bool {
-        if let Some(text) = Self::html_fallback_text(text) {
-            let bot = self.bot.clone();
-            let chat_id = self.chat_id;
-            match self
-                .request_with_throttle(
-                    &format!("editing Telegram message {} with plain-text fallback", msg_id.0),
-                    move || bot.edit_message_text(chat_id, msg_id, text.clone()).send(),
-                )
-                .await
-            {
-                Ok(_) => true,
-                Err(err) => {
-                    sess_warn!(
-                        "Failed to edit Telegram message {} with plain-text fallback: {}",
-                        msg_id.0,
-                        err
-                    );
-                    false
-                }
-            }
-        } else {
-            let bot = self.bot.clone();
-            let chat_id = self.chat_id;
-            let text = text.to_string();
-            match self
-                .request_with_throttle(&format!("editing Telegram message {}", msg_id.0), move || {
-                    bot.edit_message_text(chat_id, msg_id, text.clone())
-                        .parse_mode(ParseMode::Html)
-                        .send()
-                })
-                .await
-            {
-                Ok(_) => true,
-                Err(err) => {
-                    sess_warn!("Failed to edit Telegram message {}: {}", msg_id.0, err);
-                    false
-                }
+        let bot = self.bot.clone();
+        let chat_id = self.chat_id;
+        let text = text.to_string();
+        match self
+            .request_with_throttle(
+                &format!("editing Telegram rich message {}", msg_id.0),
+                move || {
+                    let bot = bot.clone();
+                    let text = text.clone();
+                    async move { telegram_rich::edit_rich_markdown(&bot, chat_id, msg_id, &text).await }
+                },
+            )
+            .await
+        {
+            Ok(_) => true,
+            Err(err) => {
+                sess_warn!("Failed to edit Telegram rich message {}: {}", msg_id.0, err);
+                false
             }
         }
     }
 
     pub async fn edit_html_drop(&mut self, msg_id: MessageId, text: &str) -> bool {
-        if let Some(text) = Self::html_fallback_text(text) {
-            let bot = self.bot.clone();
-            let chat_id = self.chat_id;
-            match self
-                .request_with_throttle_drop(
-                    &format!("editing Telegram message {} with plain-text fallback", msg_id.0),
-                    move || bot.edit_message_text(chat_id, msg_id, text.clone()).send(),
-                )
-                .await
-            {
-                Ok(Some(_)) => true,
-                Ok(None) => false,
-                Err(err) => {
-                    sess_warn!(
-                        "Failed to edit Telegram message {} with plain-text fallback: {}",
-                        msg_id.0,
-                        err
-                    );
-                    false
-                }
-            }
-        } else {
-            let bot = self.bot.clone();
-            let chat_id = self.chat_id;
-            let text = text.to_string();
-            match self
-                .request_with_throttle_drop(&format!("editing Telegram message {}", msg_id.0), move || {
-                    bot.edit_message_text(chat_id, msg_id, text.clone())
-                        .parse_mode(ParseMode::Html)
-                        .send()
-                })
-                .await
-            {
-                Ok(Some(_)) => true,
-                Ok(None) => false,
-                Err(err) => {
-                    sess_warn!("Failed to edit Telegram message {}: {}", msg_id.0, err);
-                    false
-                }
+        let bot = self.bot.clone();
+        let chat_id = self.chat_id;
+        let text = text.to_string();
+        match self
+            .request_with_throttle_drop(
+                &format!("editing Telegram rich message {}", msg_id.0),
+                move || {
+                    let bot = bot.clone();
+                    let text = text.clone();
+                    async move { telegram_rich::edit_rich_markdown(&bot, chat_id, msg_id, &text).await }
+                },
+            )
+            .await
+        {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(err) => {
+                sess_warn!("Failed to edit Telegram rich message {}: {}", msg_id.0, err);
+                false
             }
         }
     }
@@ -338,9 +259,18 @@ impl EventContext {
         let bot = self.bot.clone();
         let chat_id = self.chat_id;
         if let Err(err) = self
-            .request_with_throttle(&format!("deleting Telegram message {}", msg_id.0), move || {
-                bot.delete_message(chat_id, msg_id).send()
-            })
+            .request_with_throttle(
+                &format!("deleting Telegram message {}", msg_id.0),
+                move || {
+                    let bot = bot.clone();
+                    async move {
+                        bot.delete_message(chat_id, msg_id)
+                            .send()
+                            .await
+                            .map_err(Into::into)
+                    }
+                },
+            )
             .await
         {
             sess_warn!("Failed to delete Telegram message {}: {}", msg_id.0, err);
@@ -351,11 +281,19 @@ impl EventContext {
         let bot = self.bot.clone();
         let chat_id = self.chat_id;
         if let Err(e) = self
-            .request_with_throttle(&format!("pinning Telegram message {}", msg_id.0), move || {
-                bot.pin_chat_message(chat_id, msg_id)
-                    .disable_notification(true)
-                    .send()
-            })
+            .request_with_throttle(
+                &format!("pinning Telegram message {}", msg_id.0),
+                move || {
+                    let bot = bot.clone();
+                    async move {
+                        bot.pin_chat_message(chat_id, msg_id)
+                            .disable_notification(true)
+                            .send()
+                            .await
+                            .map_err(Into::into)
+                    }
+                },
+            )
             .await
         {
             sess_warn!("Failed to pin Telegram message {}: {}", msg_id.0, e);
@@ -368,8 +306,13 @@ impl EventContext {
         let thread_id = self.thread_id;
         let _ = self
             .request_with_throttle("closing Telegram topic", move || {
-                bot.close_forum_topic(chat_id, ThreadId(MessageId(thread_id)))
-                    .send()
+                let bot = bot.clone();
+                async move {
+                    bot.close_forum_topic(chat_id, ThreadId(MessageId(thread_id)))
+                        .send()
+                        .await
+                        .map_err(Into::into)
+                }
             })
             .await
             .map_err(|err| sess_warn!("Failed to close Telegram topic: {err}"));

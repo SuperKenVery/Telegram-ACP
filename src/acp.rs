@@ -216,9 +216,8 @@ pub async fn init_session(
     session_log: &SessionLog,
 ) -> Result<SessionBootstrap> {
     let init_request = acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_info(
-            acp::Implementation::new("telegram-acp", env!("CARGO_PKG_VERSION"))
-                .title("Telegram ACP"),
-        );
+        acp::Implementation::new("telegram-acp", env!("CARGO_PKG_VERSION")).title("Telegram ACP"),
+    );
     session_log.log_acp_payload(
         TranscriptDirection::ToAgent,
         &serde_json::json!({ "method": "initialize", "params": &init_request }),
@@ -256,8 +255,7 @@ pub async fn resume_session(
     session_log: &SessionLog,
 ) -> Result<SessionBootstrap> {
     let init_request = acp::InitializeRequest::new(acp::ProtocolVersion::V1).client_info(
-        acp::Implementation::new("telegram-acp", env!("CARGO_PKG_VERSION"))
-            .title("Telegram ACP"),
+        acp::Implementation::new("telegram-acp", env!("CARGO_PKG_VERSION")).title("Telegram ACP"),
     );
     session_log.log_acp_payload(
         TranscriptDirection::ToAgent,
@@ -319,7 +317,8 @@ pub async fn resume_session(
         }
     } else {
         tracing::info!("Agent does not support load_session, creating new session");
-        let new_session_request = acp::NewSessionRequest::new(project_path).mcp_servers(mcp_servers);
+        let new_session_request =
+            acp::NewSessionRequest::new(project_path).mcp_servers(mcp_servers);
         session_log.log_acp_payload(
             TranscriptDirection::ToAgent,
             &serde_json::json!({ "method": "new_session", "params": &new_session_request }),
