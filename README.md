@@ -32,6 +32,25 @@ telegram-acp
 nix run github:SuperKenVery/Telegram-ACP
 ```
 
+### Home Manager service
+
+The flake exposes a Home Manager module for running the daemon as a user
+service:
+
+```nix
+{
+  imports = [ inputs.telegram-acp.homeManagerModules.default ];
+
+  services.telegram-acp = {
+    enable = true;
+    botTokenFile = "/run/secrets/telegram-acp-bot-token";
+    chatId = 123456789;
+    defaultAgent = "codex";
+    agents.codex = "codex --acp";
+  };
+}
+```
+
 **Method 3**: Compile from source
 
 ```bash

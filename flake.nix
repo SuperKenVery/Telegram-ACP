@@ -99,5 +99,9 @@
           OPENSSL_INCLUDE_DIR = "${pkgs.openssl.dev}/include";
         };
       }
-    );
+    )
+    // {
+      homeManagerModules.default = import ./nix/home-manager.nix { inherit self; };
+      homeManagerModules.telegram-acp = self.homeManagerModules.default;
+    };
 }
