@@ -18,11 +18,14 @@ use teloxide::types::{InputFile, MessageId, ThreadId};
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
+use crate::daemon::DaemonHandle;
 use crate::telegraph;
+use crate::types::NewSessionArgs;
 
 #[derive(Clone)]
 struct McpServer {
     bot: Bot,
+    daemon: Arc<DaemonHandle>,
     telegraph: Arc<telegraph_rs::Telegraph>,
     chat_id: ChatId,
     thread_id: i32,
@@ -134,6 +137,43 @@ impl McpServer {
             "Uploaded image: {filename}"
         ))]))
     }
+
+    /// Create a new Telegram-ACP session in a new forum topic
+    #[tool]
+    async fn create_session(
+        &self,
+        Parameters(args): Parameters<NewSessionArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let project_path = match &args.project_path {
+            Some(p) if Path::new(p).is_absolute() => p.clone(),
+            Some(p) => std::env::current_dir()
+                .map_err(|e| ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), None))?
+                .join(p)
+                .to_string_lossy()
+                .to_string(),
+            None => self.project_path.to_string_lossy().to_string(),
+        };
+
+        match self
+            .daemon
+            .spawn_session(project_path, None, args.agent)
+            .await
+        {
+            Ok((acp_session_id, thread_id)) => {
+                let topic_url = format!("https://t.me/c/{}/{}", self.chat_id.0, thread_id);
+                Ok(CallToolResult::success(vec![
+                    Content::text(format!(
+                        "Session created successfully!\nACP session: {acp_session_id}\nTopic: {topic_url}\nYou can now interact with this session in the Telegram topic."
+                    )),
+                ]))
+            }
+            Err(e) => Err(ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to create session: {e}"),
+                None,
+            )),
+        }
+    }
 }
 
 #[tool_handler]
@@ -151,6 +191,7 @@ impl ServerHandler for McpServer {
 impl McpServer {
     fn new(
         bot: Bot,
+        daemon: Arc<DaemonHandle>,
         telegraph: Arc<telegraph_rs::Telegraph>,
         chat_id: ChatId,
         thread_id: i32,
@@ -158,6 +199,7 @@ impl McpServer {
     ) -> Self {
         Self {
             bot,
+            daemon,
             telegraph,
             chat_id,
             thread_id,
@@ -176,6 +218,7 @@ pub struct McpSession {
 impl McpSession {
     pub async fn new(
         bot: Bot,
+        daemon: Arc<DaemonHandle>,
         telegraph: Arc<telegraph_rs::Telegraph>,
         chat_id: ChatId,
         thread_id: i32,
@@ -185,7 +228,7 @@ impl McpSession {
         let (incoming_tx, incoming_rx) = mpsc::unbounded();
         let (outgoing_tx, outgoing_rx) = mpsc::unbounded();
 
-        let server = McpServer::new(bot, telegraph, chat_id, thread_id, project_path);
+        let server = McpServer::new(bot, daemon, telegraph, chat_id, thread_id, project_path);
         let session_id_for_log = id.clone();
         tokio::task::spawn_local(async move {
             tracing::debug!(session_id = %session_id_for_log, "MCP server task started, waiting for initialize");

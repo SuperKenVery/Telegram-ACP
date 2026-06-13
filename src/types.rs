@@ -1,5 +1,6 @@
 use agent_client_protocol as acp;
 use chrono::{DateTime, Utc};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -68,6 +69,16 @@ pub struct SessionRecord {
 }
 
 // === Agent Events (sent from ACP Client impl to Telegram sender) ===
+
+/// Arguments for creating a new session, shared between the /new slash command
+/// and the MCP `create_session` tool.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct NewSessionArgs {
+    /// Agent name from config (e.g. claude, codex). Falls back to default_agent if not set.
+    pub agent: Option<String>,
+    /// Project path. If not provided, the agent's current working directory is used.
+    pub project_path: Option<String>,
+}
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]

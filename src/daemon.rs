@@ -21,8 +21,8 @@ use crate::config::Config;
 use crate::mcp;
 use crate::persistence::{self, PersistedTopic};
 use crate::session;
-use crate::session_log::{self, SessionContext, SessionLog, with_session_context};
 use crate::session_control::{self, SessionCommand};
+use crate::session_log::{self, with_session_context, SessionContext, SessionLog};
 use crate::telegram;
 use crate::types::{AgentEvent, SessionRecord, SessionStatus};
 use crate::{sess_error, sess_info};
@@ -391,7 +391,7 @@ impl DaemonHandle {
     /// Common logic for starting a session (new or restored).
     /// Spawns event consumer and agent task, waits for ACP init, inserts into DashMap.
     async fn start_session_local(
-        &self,
+        self: Arc<Self>,
         thread_id: i32,
         project_path: PathBuf,
         agent_cmd: String,
@@ -417,6 +417,7 @@ impl DaemonHandle {
         let mcp_session = Arc::new(
             mcp::McpSession::new(
                 self.bot.clone(),
+                self.clone(),
                 self.telegraph.clone(),
                 ChatId(self.config.chat_id),
                 thread_id,
@@ -503,7 +504,9 @@ impl DaemonHandle {
         let acp_session_id = result_rx.await??;
         if let Some(topic) = self.topics.get(&thread_id) {
             if let Some(active) = topic.active.as_ref() {
-                active.session_log.set_acp_session_id(acp_session_id.clone())?;
+                active
+                    .session_log
+                    .set_acp_session_id(acp_session_id.clone())?;
             }
         }
         if let Some(mut topic) = self.topics.get_mut(&thread_id) {
@@ -585,10 +588,7 @@ async fn spawn_and_run_agent(
     .await
     {
         Ok((conn, mut child, bootstrap, session_loading_in_progress)) => {
-            sess_info!(
-                "ACP init completed with session {}",
-                bootstrap.session_id
-            );
+            sess_info!("ACP init completed with session {}", bootstrap.session_id);
             if existing_acp_session_id.is_some() && initiated_via_switch {
                 // On daemon restart, we send nothing
                 let msg = "Switched to the selected session. Replay hidden; ready for new prompts.";
@@ -733,18 +733,18 @@ async fn init_agent(
             mcp_servers,
             &session_log,
         )
-            .await
-            .map_err(|e| {
-                let stderr_tail = acp::format_stderr_tail(&stderr_tail);
-                anyhow::anyhow!(
-                    "ACP resume_session failed (cmd: {}, project: {}, previous_session: {}): {:#}{}",
-                    agent_cmd,
-                    project_path.display(),
-                    old_id,
-                    e,
-                    stderr_tail
-                )
-            })?;
+        .await
+        .map_err(|e| {
+            let stderr_tail = acp::format_stderr_tail(&stderr_tail);
+            anyhow::anyhow!(
+                "ACP resume_session failed (cmd: {}, project: {}, previous_session: {}): {:#}{}",
+                agent_cmd,
+                project_path.display(),
+                old_id,
+                e,
+                stderr_tail
+            )
+        })?;
         session
     } else {
         acp::init_session(&conn, project_path, mcp_servers, &session_log)

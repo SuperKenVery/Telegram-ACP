@@ -7,6 +7,7 @@ use teloxide::prelude::*;
 use teloxide::types::{MessageId, ParseMode, ThreadId};
 
 use crate::formatting;
+use crate::types::NewSessionArgs;
 
 use super::{Command, CommandContext};
 
@@ -39,9 +40,9 @@ impl Command for NewCommand {
                 };
 
                 // Default to current session's agent when no agent specified
-                let agent = parsed.agent.or_else(|| {
-                    ctx.daemon.get_session_agent_by_thread(thread_id)
-                });
+                let agent = parsed
+                    .agent
+                    .or_else(|| ctx.daemon.get_session_agent_by_thread(thread_id));
 
                 match ctx
                     .daemon
@@ -61,10 +62,7 @@ impl Command for NewCommand {
                     }
                     Err(e) => {
                         ctx.bot
-                            .send_message(
-                                ctx.msg.chat.id,
-                                format!("Failed to create session: {e}"),
-                            )
+                            .send_message(ctx.msg.chat.id, format!("Failed to create session: {e}"))
                             .message_thread_id(ThreadId(MessageId(thread_id)))
                             .await?;
                     }
@@ -72,9 +70,9 @@ impl Command for NewCommand {
             }
             None => {
                 // No topic: create new topic (requires explicit path)
-                let project_path = parsed
-                    .project_path
-                    .ok_or_else(|| anyhow!("Provide a project path: /new [agent] <project_path>"))?;
+                let project_path = parsed.project_path.ok_or_else(|| {
+                    anyhow!("Provide a project path: /new [agent] <project_path>")
+                })?;
                 let project_path = absolutize_project_path(PathBuf::from(project_path))?;
 
                 match ctx
@@ -98,10 +96,7 @@ impl Command for NewCommand {
                     }
                     Err(e) => {
                         ctx.bot
-                            .send_message(
-                                ctx.msg.chat.id,
-                                format!("Failed to create session: {e}"),
-                            )
+                            .send_message(ctx.msg.chat.id, format!("Failed to create session: {e}"))
                             .await?;
                     }
                 }
@@ -120,15 +115,13 @@ fn absolutize_project_path(path: PathBuf) -> Result<PathBuf> {
     }
 }
 
-struct NewArgs {
-    agent: Option<String>,
-    project_path: Option<String>,
-}
-
-fn parse_new_args(args: &str, configured_agents: &HashMap<String, String>) -> Result<NewArgs> {
+fn parse_new_args(
+    args: &str,
+    configured_agents: &HashMap<String, String>,
+) -> Result<NewSessionArgs> {
     let trimmed = args.trim();
     if trimmed.is_empty() {
-        return Ok(NewArgs {
+        return Ok(NewSessionArgs {
             agent: None,
             project_path: None,
         });
@@ -139,7 +132,7 @@ fn parse_new_args(args: &str, configured_agents: &HashMap<String, String>) -> Re
     let second = parts.next().map(str::trim).filter(|s| !s.is_empty());
 
     if configured_agents.contains_key(first) {
-        return Ok(NewArgs {
+        return Ok(NewSessionArgs {
             agent: Some(first.to_string()),
             project_path: second.map(ToOwned::to_owned),
         });
@@ -152,7 +145,7 @@ fn parse_new_args(args: &str, configured_agents: &HashMap<String, String>) -> Re
         );
     }
 
-    Ok(NewArgs {
+    Ok(NewSessionArgs {
         agent: None,
         project_path: Some(trimmed.to_string()),
     })
