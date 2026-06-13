@@ -6,22 +6,6 @@ pub fn escape_html(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// Escape text inserted into Telegram rich Markdown outside code blocks.
-pub fn escape_markdown_text(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for ch in text.chars() {
-        match ch {
-            '\\' | '`' | '*' | '_' | '{' | '}' | '[' | ']' | '<' | '>' | '(' | ')' | '#' | '+'
-            | '-' | '.' | '!' | '|' => {
-                escaped.push('\\');
-                escaped.push(ch);
-            }
-            _ => escaped.push(ch),
-        }
-    }
-    escaped
-}
-
 /// Format an agent text message for Telegram rich Markdown.
 pub fn format_text_message(text: &str) -> String {
     // Keep model text as Markdown and convert once at send boundary.
@@ -78,7 +62,7 @@ pub fn format_tool_result(
 
 /// Format a completion message as rich Markdown.
 pub fn format_completion(stop_reason: &str) -> String {
-    format!("✓ **Done** ({})", escape_markdown_text(stop_reason))
+    format!("✓ **Done** ({stop_reason})")
 }
 
 /// Format an error message as rich Markdown.
@@ -131,7 +115,7 @@ pub fn format_plan_completed(plan: &acp::Plan) -> String {
         lines.push(format!(
             "{}. ✅ {}",
             idx + 1,
-            escape_markdown_text(&truncate_message(&entry.content, 500))
+            truncate_message(&entry.content, 500)
         ));
     }
     lines.join("\n")

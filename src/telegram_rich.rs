@@ -1,6 +1,6 @@
 use serde_json::Value;
 use teloxide::prelude::*;
-use teloxide::types::{MessageId, ThreadId};
+use teloxide::types::{MessageId, Seconds, ThreadId};
 
 const RICH_MESSAGE_LIMIT: usize = 32_768;
 const TRUNCATED_SUFFIX: &str = "\n\n…[truncated]";
@@ -174,6 +174,9 @@ where
     let payload: Value = resp.json().await?;
 
     if !status.is_success() || !payload.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+        if let Some(after) = retry_after_from_payload(&payload) {
+            return Err(teloxide::RequestError::RetryAfter(after).into());
+        }
         anyhow::bail!("{method} failed ({status}): {payload}");
     }
 
@@ -182,6 +185,15 @@ where
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("{method} response did not include result"))?;
     Ok(serde_json::from_value(result)?)
+}
+
+fn retry_after_from_payload(payload: &Value) -> Option<Seconds> {
+    let seconds = payload
+        .get("parameters")?
+        .get("retry_after")?
+        .as_u64()?
+        .min(u32::MAX as u64) as u32;
+    Some(Seconds::from_seconds(seconds))
 }
 
 #[allow(dead_code)]
@@ -227,6 +239,22 @@ mod tests {
         assert!(!out.contains("/Users/ken/project/README.md"));
         assert!(out.len() <= RICH_MESSAGE_LIMIT);
         assert!(out.ends_with("…[truncated]"));
+    }
+
+    #[test]
+    fn extracts_retry_after_from_telegram_error_payload() {
+        let payload = serde_json::json!({
+            "ok": false,
+            "description": "Too Many Requests: retry after 7",
+            "parameters": {
+                "retry_after": 7
+            }
+        });
+
+        assert_eq!(
+            retry_after_from_payload(&payload),
+            Some(Seconds::from_seconds(7))
+        );
     }
 
     #[test]

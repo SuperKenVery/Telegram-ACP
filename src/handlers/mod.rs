@@ -113,42 +113,6 @@ impl EventContext {
         }
     }
 
-    async fn request_with_throttle_drop<T, F, Fut>(
-        &mut self,
-        label: &str,
-        mut request: F,
-    ) -> anyhow::Result<Option<T>>
-    where
-        F: FnMut() -> Fut,
-        Fut: Future<Output = anyhow::Result<T>>,
-    {
-        if !self.throttle.try_turn() {
-            return Ok(None);
-        }
-        match request().await {
-            Ok(value) => Ok(Some(value)),
-            Err(err)
-                if err
-                    .downcast_ref::<teloxide::RequestError>()
-                    .is_some_and(|e| matches!(e, teloxide::RequestError::RetryAfter(_))) =>
-            {
-                let teloxide::RequestError::RetryAfter(after) =
-                    err.downcast_ref::<teloxide::RequestError>().unwrap()
-                else {
-                    unreachable!()
-                };
-                let delay = after.duration() + Self::RETRY_AFTER_PADDING;
-                self.throttle.defer_for(delay);
-                sess_warn!(
-                    "Telegram rate limit while {label}; backing off for {}s (dropping update)",
-                    delay.as_secs()
-                );
-                Ok(None)
-            }
-            Err(err) => Err(err),
-        }
-    }
-
     pub async fn send_markdown(&mut self, text: &str, silent: bool) -> Option<Message> {
         let bot = self.bot.clone();
         let chat_id = self.chat_id;
@@ -165,30 +129,6 @@ impl EventContext {
             .await
         {
             Ok(message) => Some(message),
-            Err(err) => {
-                sess_warn!("Failed to send rich message to Telegram: {err}");
-                None
-            }
-        }
-    }
-
-    pub async fn send_markdown_drop(&mut self, text: &str, silent: bool) -> Option<Message> {
-        let bot = self.bot.clone();
-        let chat_id = self.chat_id;
-        let thread_id = self.thread_id;
-        let text = text.to_string();
-        match self
-            .request_with_throttle_drop("sending rich message to Telegram", move || {
-                let bot = bot.clone();
-                let text = text.clone();
-                async move {
-                    telegram_rich::send_rich_markdown(&bot, chat_id, thread_id, &text, silent).await
-                }
-            })
-            .await
-        {
-            Ok(Some(message)) => Some(message),
-            Ok(None) => None,
             Err(err) => {
                 sess_warn!("Failed to send rich message to Telegram: {err}");
                 None
@@ -218,30 +158,6 @@ impl EventContext {
             .await
         {
             Ok(_) => true,
-            Err(err) => {
-                sess_warn!("Failed to edit Telegram rich message {}: {}", msg_id.0, err);
-                false
-            }
-        }
-    }
-
-    pub async fn edit_markdown_drop(&mut self, msg_id: MessageId, text: &str) -> bool {
-        let bot = self.bot.clone();
-        let chat_id = self.chat_id;
-        let text = text.to_string();
-        match self
-            .request_with_throttle_drop(
-                &format!("editing Telegram rich message {}", msg_id.0),
-                move || {
-                    let bot = bot.clone();
-                    let text = text.clone();
-                    async move { telegram_rich::edit_rich_markdown(&bot, chat_id, msg_id, &text).await }
-                },
-            )
-            .await
-        {
-            Ok(Some(_)) => true,
-            Ok(None) => false,
             Err(err) => {
                 sess_warn!("Failed to edit Telegram rich message {}: {}", msg_id.0, err);
                 false
