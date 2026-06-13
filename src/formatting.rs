@@ -12,27 +12,35 @@ pub fn format_text_message(text: &str) -> String {
     truncate_message(text, 32_768)
 }
 
-/// Format a thought/reasoning message for Telegram (HTML).
+/// Format a thought/reasoning message as foldable rich Markdown.
 pub fn format_thought_message(text: &str) -> String {
-    let header = "💭 <b>Thought</b>";
     if text.trim().is_empty() {
-        header.to_string()
+        "💭 Thought".to_string()
     } else {
-        format!("{header}\n{}", format_collapsible_block_html(text, 3900))
+        format_details("💭 Thought", &truncate_message(text, 32_000))
     }
 }
 
-/// Format a tool call notification (HTML).
+/// Format a tool call notification as rich Markdown.
 pub fn format_tool_call(
     name: &str,
     kind: acp::ToolKind,
     status: acp::ToolCallStatus,
     details: Option<&str>,
 ) -> String {
-    format_tool_message(name, kind, status, details, 3800)
+    let (summary, body_from_name) = split_tool_title_and_body(name);
+    let body = details.or(body_from_name);
+    format_tool_message(
+        summary,
+        kind,
+        status,
+        body,
+        tool_language(kind, body),
+        16_000,
+    )
 }
 
-/// Format a tool call result/update (HTML).
+/// Format a tool call result/update as rich Markdown.
 pub fn format_tool_result(
     name: &str,
     kind: acp::ToolKind,
@@ -40,10 +48,16 @@ pub fn format_tool_result(
     output: Option<&str>,
     details: Option<&str>,
 ) -> String {
-    let body = details
-        .or(output)
-        .map(|text| truncate_message_tail(text, 1000));
-    format_tool_message(name, kind, status, body.as_deref(), 1000)
+    let (summary, body_from_name) = split_tool_title_and_body(name);
+    let body = details.or(output).or(body_from_name);
+    format_tool_message(
+        summary,
+        kind,
+        status,
+        body,
+        tool_language(kind, body),
+        16_000,
+    )
 }
 
 /// Format a completion message (HTML).
@@ -133,28 +147,23 @@ pub fn format_available_commands_html(commands: &[acp::AvailableCommand]) -> Str
     truncate_message(&lines.join("\n"), 4096)
 }
 
-fn format_collapsible_block_html(text: &str, max_len: usize) -> String {
-    let truncated = truncate_message(text, max_len);
-    let escaped = escape_html(&truncated);
-    format!("<blockquote expandable>{escaped}</blockquote>")
-}
-
 fn format_tool_message(
     name: &str,
     kind: acp::ToolKind,
     status: acp::ToolCallStatus,
     body: Option<&str>,
+    language: &'static str,
     body_max_len: usize,
 ) -> String {
-    let mut sections = vec![format_tool_header_html(name, kind, status)];
-    if let Some(body) = body {
-        sections.push(format_collapsible_block_html(body, body_max_len));
+    let header = format_tool_summary(name, kind, status);
+    match body.map(str::trim).filter(|body| !body.is_empty()) {
+        Some(body) => format_code_details(&header, body, language, body_max_len),
+        None => header,
     }
-    sections.join("\n")
 }
 
-fn format_tool_header_html(name: &str, kind: acp::ToolKind, status: acp::ToolCallStatus) -> String {
-    let truncated_name = truncate_message(name, 500);
+fn format_tool_summary(name: &str, kind: acp::ToolKind, status: acp::ToolCallStatus) -> String {
+    let truncated_name = truncate_message(name.trim(), 500);
     let status_icon = match status {
         acp::ToolCallStatus::Pending => "⏳",
         acp::ToolCallStatus::InProgress => "🚧",
@@ -174,17 +183,72 @@ fn format_tool_header_html(name: &str, kind: acp::ToolKind, status: acp::ToolCal
         acp::ToolKind::Other => "🛠️",
         _ => "🛠️",
     };
-    match truncated_name.split_once('\n') {
-        Some((first_line, remaining)) if !remaining.trim().is_empty() => format!(
-            "{status_icon} {kind_icon} <b>Tool:</b> {}\n{}",
-            escape_html(first_line),
-            format_collapsible_block_html(remaining, 1000)
-        ),
-        _ => format!(
-            "{status_icon} {kind_icon} <b>Tool:</b> {}",
-            escape_html(&truncated_name)
-        ),
+
+    if truncated_name.is_empty() {
+        format!("{status_icon} {kind_icon} Tool")
+    } else {
+        format!("{status_icon} {kind_icon} {truncated_name}")
     }
+}
+
+fn split_tool_title_and_body(name: &str) -> (&str, Option<&str>) {
+    match name.split_once('\n') {
+        Some((first_line, remaining)) if !remaining.trim().is_empty() => {
+            (first_line.trim(), Some(remaining.trim()))
+        }
+        _ => (name.trim(), None),
+    }
+}
+
+fn tool_language(kind: acp::ToolKind, body: Option<&str>) -> &'static str {
+    if body.is_some_and(looks_like_unified_diff) {
+        "diff"
+    } else if matches!(kind, acp::ToolKind::Execute) {
+        "shell"
+    } else {
+        ""
+    }
+}
+
+fn looks_like_unified_diff(body: &str) -> bool {
+    let trimmed = body.trim_start();
+    trimmed.starts_with("--- ") || trimmed.starts_with("diff --git")
+}
+
+fn format_code_details(summary: &str, body: &str, language: &str, max_len: usize) -> String {
+    let truncated = truncate_message(body, max_len);
+    let fence = code_fence_for(&truncated);
+    format!(
+        "<details><summary>{}</summary>\n\n{}{language}\n{}\n{}\n\n</details>",
+        escape_details_summary(summary),
+        fence,
+        truncated,
+        fence
+    )
+}
+
+fn format_details(summary: &str, body: &str) -> String {
+    format!(
+        "<details><summary>{}</summary>\n\n{}\n\n</details>",
+        escape_details_summary(summary),
+        body
+    )
+}
+
+fn code_fence_for(body: &str) -> String {
+    let longest_run = body
+        .split(|ch| ch != '`')
+        .filter(|run| !run.is_empty())
+        .map(str::len)
+        .max()
+        .unwrap_or(0);
+    "`".repeat(longest_run.max(2) + 1)
+}
+
+fn escape_details_summary(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// Truncate a message to fit within a maximum length.
@@ -198,19 +262,6 @@ pub fn truncate_message(text: &str, max_len: usize) -> String {
         // Find a safe char boundary
         let cut = text.floor_char_boundary(cut);
         format!("{}{}", &text[..cut], suffix)
-    }
-}
-
-/// Truncate a message to keep the tail within a maximum length.
-/// If truncated, prepends "[truncated]…".
-pub fn truncate_message_tail(text: &str, max_len: usize) -> String {
-    if text.len() <= max_len {
-        text.to_string()
-    } else {
-        let prefix = "[truncated]…";
-        let keep = max_len.saturating_sub(prefix.len());
-        let start = text.ceil_char_boundary(text.len().saturating_sub(keep));
-        format!("{}{}", prefix, &text[start..])
     }
 }
 
@@ -279,20 +330,27 @@ mod tests {
     }
 
     #[test]
-    fn formats_multiline_tool_input_in_collapsible_block() {
+    fn formats_multiline_shell_tool_input_in_foldable_code_block() {
         let text = format_tool_call(
-            "Run command\ncargo test\n-- --nocapture",
+            "Run command
+cargo test
+-- --nocapture",
             acp::ToolKind::Execute,
             acp::ToolCallStatus::InProgress,
             None,
         );
 
-        assert!(text.contains("<b>Tool:</b> Run command"));
-        assert!(text.contains("<blockquote expandable>cargo test\n-- --nocapture</blockquote>"));
+        assert!(text.starts_with("<details><summary>🚧 ▶️ Run command</summary>"));
+        assert!(text.contains(
+            "```shell
+cargo test
+-- --nocapture
+```"
+        ));
     }
 
     #[test]
-    fn keeps_single_line_tool_input_out_of_collapsible_block() {
+    fn keeps_single_line_tool_input_out_of_details() {
         let text = format_tool_call(
             "Run cargo test",
             acp::ToolKind::Execute,
@@ -300,11 +358,34 @@ mod tests {
             None,
         );
 
-        assert_eq!(text.matches("<blockquote expandable>").count(), 0);
+        assert!(!text.contains("<details>"));
+        assert_eq!(text, "🚧 ▶️ Run cargo test");
     }
 
     #[test]
-    fn truncates_large_tool_result_to_telegram_limit() {
+    fn formats_diff_tool_details_in_diff_code_block() {
+        let text = format_tool_call(
+            "keymap.json",
+            acp::ToolKind::Edit,
+            acp::ToolCallStatus::Completed,
+            Some(
+                "--- a/keymap.json
++++ b/keymap.json
+@@ -1 +1 @@
+-old
++new",
+            ),
+        );
+
+        assert!(text.starts_with("<details><summary>✅ ✏️ keymap.json</summary>"));
+        assert!(text.contains(
+            "```diff
+--- a/keymap.json"
+        ));
+    }
+
+    #[test]
+    fn truncates_large_tool_result_to_rich_message_limit() {
         use super::format_tool_result;
 
         let text = format_tool_result(
@@ -315,13 +396,18 @@ mod tests {
             None,
         );
 
-        assert!(text.len() <= 4096);
-        assert!(text.contains("[truncated]"));
+        assert!(text.len() <= 16_384);
+        assert!(text.contains("…[truncated]"));
     }
 
     #[test]
-    fn truncates_tool_name_before_html_formatting() {
-        let name = format!("{}\n{}", "a".repeat(600), "b".repeat(2000));
+    fn truncates_tool_name_before_markdown_formatting() {
+        let name = format!(
+            "{}
+{}",
+            "a".repeat(600),
+            "b".repeat(20_000)
+        );
         let text = format_tool_call(
             &name,
             acp::ToolKind::Execute,
@@ -329,9 +415,23 @@ mod tests {
             None,
         );
 
-        assert!(text.contains("<b>Tool:</b>"));
+        assert!(text.contains("<details><summary>"));
         assert!(text.contains("…[truncated]"));
-        assert!(text.contains("</blockquote>") || !text.contains("<blockquote"));
+        assert!(text.contains("```shell"));
+    }
+
+    #[test]
+    fn formats_thought_as_foldable_markdown() {
+        let text = super::format_thought_message("I should inspect the code.");
+
+        assert_eq!(
+            text,
+            "<details><summary>💭 Thought</summary>
+
+I should inspect the code.
+
+</details>"
+        );
     }
 
     #[test]
