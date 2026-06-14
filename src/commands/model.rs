@@ -21,7 +21,7 @@ impl Command for ModelCommand {
 
     async fn execute(&self, ctx: CommandContext<'_>) -> Result<()> {
         let thread_id = ctx.require_thread_id()?;
-        let state = get_control_state(ctx.daemon, thread_id).await?;
+        let state = get_control_state(&ctx.daemon, thread_id).await?;
         let selector = match state.model_selector {
             Some(selector) => selector,
             None => {
@@ -38,7 +38,7 @@ impl Command for ModelCommand {
 
         let arg = ctx.args.trim();
         if !arg.is_empty() {
-            match set_config_option(ctx.daemon, thread_id, &selector.config_id, arg).await {
+            match set_config_option(&ctx.daemon, thread_id, &selector.config_id, arg).await {
                 Ok(updated) => {
                     let model_name = updated
                         .model_selector
@@ -106,7 +106,7 @@ impl Command for ModelCommand {
             return Ok(false);
         };
 
-        match set_config_option(ctx.daemon, thread_id, &config_id, &value_id).await {
+        match set_config_option(&ctx.daemon, thread_id, &config_id, &value_id).await {
             Ok(updated) => {
                 let model_name = updated
                     .model_selector

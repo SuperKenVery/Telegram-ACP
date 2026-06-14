@@ -56,7 +56,7 @@ impl DraftHandler {
                 DraftKind::AgentMessage => formatting::format_text_message(&d.text),
                 DraftKind::AgentThought => formatting::format_thought_message(&d.text),
             };
-            ctx.send_chunks(&finalized_text, true).await;
+            ctx.send_markdown_chunks(&finalized_text, true).await;
         }
     }
 

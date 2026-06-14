@@ -46,6 +46,7 @@ impl Command for NewCommand {
 
                 match ctx
                     .daemon
+                    .clone()
                     .replace_session_in_thread(thread_id, project_path, agent)
                     .await
                 {
@@ -77,6 +78,7 @@ impl Command for NewCommand {
 
                 match ctx
                     .daemon
+                    .clone()
                     .spawn_session(
                         project_path.to_string_lossy().to_string(),
                         None,

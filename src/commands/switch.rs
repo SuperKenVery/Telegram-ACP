@@ -147,7 +147,12 @@ impl Command for SwitchCommand {
             record.clone()
         };
 
-        match ctx.daemon.switch_to_session(thread_id, &record).await {
+        match ctx
+            .daemon
+            .clone()
+            .switch_to_session(thread_id, &record)
+            .await
+        {
             Ok(new_id) => {
                 let selected_label = record
                     .agent_name

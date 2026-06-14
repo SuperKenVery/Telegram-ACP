@@ -21,7 +21,7 @@ impl Command for CancelCommand {
 
     async fn execute(&self, ctx: CommandContext<'_>) -> Result<()> {
         let thread_id = ctx.require_thread_id()?;
-        cancel_prompt(ctx.daemon, thread_id).await?;
+        cancel_prompt(&ctx.daemon, thread_id).await?;
         ctx.bot
             .send_message(
                 ctx.msg.chat.id,
@@ -40,7 +40,7 @@ impl Command for CancelCommand {
             return Ok(false);
         };
 
-        match cancel_prompt(ctx.daemon, thread_id).await {
+        match cancel_prompt(&ctx.daemon, thread_id).await {
             Ok(()) => {
                 ctx.bot
                     .answer_callback_query(ctx.query.id.clone())

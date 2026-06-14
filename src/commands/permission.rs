@@ -21,7 +21,7 @@ impl Command for PermissionCommand {
 
     async fn execute(&self, ctx: CommandContext<'_>) -> Result<()> {
         let thread_id = ctx.require_thread_id()?;
-        let state = get_control_state(ctx.daemon, thread_id).await?;
+        let state = get_control_state(&ctx.daemon, thread_id).await?;
         if state.permission_modes.is_empty() {
             ctx.bot
                 .send_message(
@@ -78,7 +78,7 @@ impl Command for PermissionCommand {
             return Ok(false);
         };
 
-        match set_permission_mode(ctx.daemon, thread_id, &mode_id).await {
+        match set_permission_mode(&ctx.daemon, thread_id, &mode_id).await {
             Ok(updated) => {
                 let current = updated.current_permission_mode_id.as_deref();
                 let mode_name = updated

@@ -136,6 +136,7 @@ impl EventContext {
         }
     }
 
+    /// Send markdown, but chunk it if too long
     pub async fn send_markdown_chunks(&mut self, text: &str, silent: bool) {
         for chunk in formatting::split_message(text, 32_768) {
             let _ = self.send_markdown(&chunk, silent).await;
@@ -163,10 +164,6 @@ impl EventContext {
                 false
             }
         }
-    }
-
-    pub async fn send_chunks(&mut self, text: &str, silent: bool) {
-        self.send_markdown_chunks(text, silent).await;
     }
 
     pub async fn delete_msg(&mut self, msg_id: MessageId) {

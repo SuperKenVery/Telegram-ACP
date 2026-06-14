@@ -44,7 +44,7 @@ async fn handle_message(bot: Bot, msg: Message, daemon: Arc<DaemonHandle>) -> an
         return Ok(());
     }
 
-    if commands::execute_slash_command(&bot, &msg, &daemon).await? {
+    if commands::execute_slash_command(&bot, &msg, daemon.clone()).await? {
         return Ok(());
     }
 

@@ -37,7 +37,7 @@ use timer::TimerCommand;
 pub struct CommandContext<'a> {
     pub bot: &'a Bot,
     pub msg: &'a Message,
-    pub daemon: &'a DaemonHandle,
+    pub daemon: Arc<DaemonHandle>,
     pub thread_id: Option<i32>,
     pub args: &'a str,
 }
@@ -49,11 +49,11 @@ impl CommandContext<'_> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct CallbackContext<'a> {
     pub bot: &'a Bot,
     pub query: &'a CallbackQuery,
-    pub daemon: &'a DaemonHandle,
+    pub daemon: Arc<DaemonHandle>,
 }
 
 #[async_trait]
@@ -124,7 +124,7 @@ fn parse_command(text: &str) -> Option<(String, String)> {
 pub async fn execute_slash_command(
     bot: &Bot,
     msg: &Message,
-    daemon: &DaemonHandle,
+    daemon: Arc<DaemonHandle>,
 ) -> Result<bool> {
     let text = match msg.text() {
         Some(value) => value,
@@ -180,11 +180,11 @@ pub async fn handle_callback_query(
     let ctx = CallbackContext {
         bot: &bot,
         query: &query,
-        daemon: daemon.as_ref(),
+        daemon,
     };
 
     for command in command_registry() {
-        if command.try_handle_callback(ctx).await? {
+        if command.try_handle_callback(ctx.clone()).await? {
             return Ok(());
         }
     }

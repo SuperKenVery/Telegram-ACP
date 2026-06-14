@@ -146,6 +146,7 @@ impl McpServer {
 
         match self
             .daemon
+            .clone()
             .spawn_session(project_path, None, args.agent)
             .await
         {
