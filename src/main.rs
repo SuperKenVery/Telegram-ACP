@@ -13,6 +13,7 @@ mod session_control;
 mod session_log;
 mod telegram;
 mod telegram_rich;
+mod tray;
 mod types;
 
 use clap::{Parser, Subcommand};
@@ -58,8 +59,7 @@ enum Commands {
     },
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let log_dir = session_log::app_data_dir().unwrap_or_else(|_| PathBuf::from("."));
     std::fs::create_dir_all(&log_dir)?;
 
@@ -88,81 +88,97 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Daemon => {
             let config = config::Config::load()?;
-            // Run inside a LocalSet since ACP requires spawn_local
-            let local = tokio::task::LocalSet::new();
-            local.run_until(daemon::run_daemon(config)).await?;
+            tray::run_daemon_with_tray(config)?;
         }
         Commands::New {
             mut path,
             prompt,
             agent,
         } => {
-            if path.is_relative() {
-                path = env::current_dir()?.join(path);
-            }
-            let config = config::Config::load()?;
-            let cmd = types::DaemonCommand::NewSession {
-                path,
-                prompt,
-                agent,
-            };
-            let response = ipc::send_command(&config.socket_path, &cmd).await?;
-            match response {
-                types::DaemonResponse::SessionCreated {
-                    acp_session_id,
-                    topic_url,
-                } => {
-                    println!("Session created: {acp_session_id}");
-                    println!("Topic: {topic_url}");
+            async_main(async move {
+                if path.is_relative() {
+                    path = env::current_dir()?.join(path);
                 }
-                types::DaemonResponse::Error { message } => {
-                    eprintln!("Error: {message}");
-                    std::process::exit(1);
-                }
-                _ => {
-                    eprintln!("Unexpected response");
-                    std::process::exit(1);
-                }
-            }
-        }
-        Commands::Status => {
-            let config = config::Config::load()?;
-            let cmd = types::DaemonCommand::ListSessions;
-            let response = ipc::send_command(&config.socket_path, &cmd).await?;
-            match response {
-                types::DaemonResponse::SessionList { sessions } => {
-                    if sessions.is_empty() {
-                        println!("No active sessions.");
-                    } else {
-                        for s in sessions {
-                            println!(
-                                "{} | {} | {:?} | thread:{}",
-                                s.acp_session_id,
-                                s.project_path.display(),
-                                s.status,
-                                s.thread_id
-                            );
-                        }
+                let config = config::Config::load()?;
+                let cmd = types::DaemonCommand::NewSession {
+                    path,
+                    prompt,
+                    agent,
+                };
+                let response = ipc::send_command(&config.socket_path, &cmd).await?;
+                match response {
+                    types::DaemonResponse::SessionCreated {
+                        acp_session_id,
+                        topic_url,
+                    } => {
+                        println!("Session created: {acp_session_id}");
+                        println!("Topic: {topic_url}");
+                    }
+                    types::DaemonResponse::Error { message } => {
+                        eprintln!("Error: {message}");
+                        std::process::exit(1);
+                    }
+                    _ => {
+                        eprintln!("Unexpected response");
+                        std::process::exit(1);
                     }
                 }
-                types::DaemonResponse::Error { message } => {
-                    eprintln!("Error: {message}");
-                    std::process::exit(1);
+                Ok(())
+            })?;
+        }
+        Commands::Status => {
+            async_main(async move {
+                let config = config::Config::load()?;
+                let cmd = types::DaemonCommand::ListSessions;
+                let response = ipc::send_command(&config.socket_path, &cmd).await?;
+                match response {
+                    types::DaemonResponse::SessionList { sessions } => {
+                        if sessions.is_empty() {
+                            println!("No active sessions.");
+                        } else {
+                            for s in sessions {
+                                println!(
+                                    "{} | {} | {:?} | thread:{}",
+                                    s.acp_session_id,
+                                    s.project_path.display(),
+                                    s.status,
+                                    s.thread_id
+                                );
+                            }
+                        }
+                    }
+                    types::DaemonResponse::Error { message } => {
+                        eprintln!("Error: {message}");
+                        std::process::exit(1);
+                    }
+                    _ => {
+                        eprintln!("Unexpected response");
+                        std::process::exit(1);
+                    }
                 }
-                _ => {
-                    eprintln!("Unexpected response");
-                    std::process::exit(1);
-                }
-            }
+                Ok(())
+            })?;
         }
         Commands::McpRelay { session, socket } => {
-            let socket_path = match socket {
-                Some(socket_path) => socket_path,
-                None => config::Config::load()?.socket_path,
-            };
-            mcp_relay::run(session, socket_path).await?;
+            async_main(async move {
+                let socket_path = match socket {
+                    Some(socket_path) => socket_path,
+                    None => config::Config::load()?.socket_path,
+                };
+                mcp_relay::run(session, socket_path).await
+            })?;
         }
     }
 
     Ok(())
+}
+
+fn async_main<F>(future: F) -> anyhow::Result<()>
+where
+    F: std::future::Future<Output = anyhow::Result<()>>,
+{
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(future)
 }

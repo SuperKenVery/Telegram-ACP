@@ -28,11 +28,7 @@ impl Command for RemoveCommand {
             return Ok(());
         }
 
-        ctx.bot
-            .delete_forum_topic(ctx.msg.chat.id, ThreadId(MessageId(thread_id)))
-            .await?;
-
-        let removed = ctx.daemon.remove_topic(thread_id).await.is_some();
+        let removed = ctx.daemon.delete_topic_and_remove_state(thread_id).await?;
 
         let summary = if removed {
             "Topic deleted. All sessions removed."
