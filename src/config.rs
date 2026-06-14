@@ -10,6 +10,7 @@ pub struct Config {
     pub socket_path: PathBuf,
     pub default_agent: String,
     pub agents: HashMap<String, String>,
+    pub tray: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -18,6 +19,7 @@ struct FileConfig {
     chat_id: Option<i64>,
     socket_path: Option<PathBuf>,
     default_agent: Option<String>,
+    tray: Option<bool>,
     #[serde(flatten)]
     extra_tables: HashMap<String, toml::Table>,
 }
@@ -74,6 +76,7 @@ impl Config {
             socket_path,
             default_agent,
             agents,
+            tray: file_config.tray,
         })
     }
 

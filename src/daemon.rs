@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc as std_mpsc;
 use std::sync::Arc;
 
 use agent_client_protocol as acp_sdk;
@@ -12,6 +13,7 @@ use rmcp::RoleServer;
 use serde_json::Value as JsonValue;
 use teloxide::prelude::*;
 use teloxide::types::InputFile;
+use tokio::runtime::Handle as RuntimeHandle;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
@@ -149,6 +151,18 @@ impl DaemonHandle {
         let (_, entry) = self.topics.remove(&thread_id)?;
         self.persist_topics().await;
         Some(entry)
+    }
+
+    /// Delete a Telegram topic and remove its saved session state.
+    pub async fn delete_topic_and_remove_state(&self, thread_id: i32) -> Result<bool> {
+        self.bot
+            .delete_forum_topic(
+                ChatId(self.config.chat_id),
+                teloxide::types::ThreadId(teloxide::types::MessageId(thread_id)),
+            )
+            .await?;
+
+        Ok(self.remove_topic(thread_id).await.is_some())
     }
 
     pub fn get_session_command_tx_by_thread(
@@ -793,7 +807,10 @@ fn mcp_expects_response(value: &JsonValue) -> bool {
 }
 
 /// Run the daemon: start bot + IPC listener.
-pub async fn run_daemon(config: Config) -> Result<()> {
+pub async fn run_daemon(
+    config: Config,
+    ready_tx: Option<std_mpsc::Sender<(Arc<DaemonHandle>, RuntimeHandle)>>,
+) -> Result<()> {
     tracing::info!("Starting telegram-acp daemon");
 
     let bot = Bot::new(&config.bot_token);
@@ -805,6 +822,10 @@ pub async fn run_daemon(config: Config) -> Result<()> {
         local_start_tx,
         topics: DashMap::new(),
     });
+
+    if let Some(ready_tx) = ready_tx {
+        let _ = ready_tx.send((daemon.clone(), RuntimeHandle::current()));
+    }
 
     let local_daemon = daemon.clone();
     tokio::task::spawn_local(async move {
