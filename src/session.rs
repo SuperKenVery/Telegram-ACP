@@ -1,4 +1,3 @@
-use acp::Agent;
 use agent_client_protocol as acp;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -23,7 +22,7 @@ enum PromptOutcome {
 }
 
 pub async fn run_session_runtime(
-    conn: Arc<acp::ClientSideConnection>,
+    conn: Arc<crate::acp::AgentConnection>,
     acp_session_id: acp::SessionId,
     bot: Bot,
     chat_id: ChatId,
@@ -78,7 +77,8 @@ pub async fn run_session_runtime(
                             }
                         }
                         let result = conn
-                            .set_session_mode(request)
+                            .send_request(request)
+                            .block_task()
                             .await
                             .map_err(|e| anyhow::anyhow!("Failed to set permission mode: {e}"));
 
@@ -118,7 +118,8 @@ pub async fn run_session_runtime(
                             }
                         }
                         let result = conn
-                            .set_session_config_option(request)
+                            .send_request(request)
+                            .block_task()
                             .await
                             .map_err(|e| anyhow::anyhow!("Failed to set config option: {e}"));
 
@@ -160,8 +161,7 @@ pub async fn run_session_runtime(
                             }
                         }
                         let result = conn
-                            .cancel(request)
-                            .await
+                            .send_notification(request)
                             .map_err(|e| anyhow::anyhow!("Failed to cancel session: {e}"));
                         let _ = result_tx.send(result);
                     }
@@ -211,7 +211,7 @@ pub async fn run_session_runtime(
 }
 
 async fn start_prompt(
-    conn: Arc<acp::ClientSideConnection>,
+    conn: Arc<crate::acp::AgentConnection>,
     acp_session_id: acp::SessionId,
     user_text: String,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
@@ -237,7 +237,7 @@ async fn start_prompt(
                 sess_warn!("Failed to record prompt request: {err}");
             }
         }
-        let prompt_result = conn.prompt(request).await;
+        let prompt_result = conn.send_request(request).block_task().await;
 
         let outcome = match prompt_result {
             Ok(resp) => {
@@ -257,9 +257,9 @@ async fn start_prompt(
     };
 
     if let Some(ctx) = current_ctx {
-        tokio::task::spawn_local(with_session_context(ctx, prompt_future));
+        tokio::spawn(with_session_context(ctx, prompt_future));
     } else {
-        tokio::task::spawn_local(prompt_future);
+        tokio::spawn(prompt_future);
     }
 }
 
@@ -354,7 +354,7 @@ pub async fn run_event_consumer(
 
         // Inline: simple events
         match event {
-            AgentEvent::Update(acp::SessionUpdate::UsageUpdate(usage)) => {
+            AgentEvent::Update(acp::SessionUpdate::UsageUpdate(_usage)) => {
                 // Usage updates are a bit noisy, we don't send it now
                 // let text = formatting::format_text_message(&format_usage_update(&usage));
                 // ctx.send_markdown_chunks(&text, true).await;

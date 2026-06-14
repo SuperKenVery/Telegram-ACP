@@ -13,7 +13,8 @@ bin-dir = "{ bin }{ binary-ext }"
 pkg-fmt = "tgz"
 
 [dependencies]
-agent-client-protocol = { version = "0.10", features = ["unstable_session_usage"] }
+agent-client-protocol = { package = "agent-client-protocol-schema", version = "0.11.2", features = ["unstable_session_usage"] }
+sacp = "11.0.0"
 reqwest = { version = "0.12", features = ["json", "socks"] }
 anyhow = "1"
 async-trait = "0.1"

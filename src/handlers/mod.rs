@@ -235,7 +235,7 @@ impl EventContext {
 
 // --- EventHandler trait ---
 
-#[async_trait::async_trait(?Send)]
+#[async_trait::async_trait]
 pub trait EventHandler {
     /// Process an event. Return true if consumed.
     async fn handle(&mut self, event: &AgentEvent, ctx: &mut EventContext) -> bool;

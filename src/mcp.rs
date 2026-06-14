@@ -217,7 +217,7 @@ impl McpSession {
 
         let server = McpServer::new(bot, daemon, chat_id, thread_id, project_path);
         let session_id_for_log = id.clone();
-        tokio::task::spawn_local(async move {
+        tokio::spawn(async move {
             tracing::debug!(session_id = %session_id_for_log, "MCP server task started, waiting for initialize");
             match server.serve((outgoing_tx, incoming_rx)).await {
                 Ok(service) => {

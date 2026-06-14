@@ -15,7 +15,7 @@ impl PlanHandler {
     }
 }
 
-#[async_trait::async_trait(?Send)]
+#[async_trait::async_trait]
 impl EventHandler for PlanHandler {
     async fn handle(&mut self, event: &AgentEvent, ctx: &mut EventContext) -> bool {
         let plan = match event {

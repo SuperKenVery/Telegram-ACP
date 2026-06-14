@@ -28,7 +28,7 @@ impl ToolCallHandler {
     }
 }
 
-#[async_trait::async_trait(?Send)]
+#[async_trait::async_trait]
 impl EventHandler for ToolCallHandler {
     async fn handle(&mut self, event: &AgentEvent, ctx: &mut EventContext) -> bool {
         match event {

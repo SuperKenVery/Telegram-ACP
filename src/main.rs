@@ -58,7 +58,7 @@ enum Commands {
     },
 }
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let log_dir = session_log::app_data_dir().unwrap_or_else(|_| PathBuf::from("."));
     std::fs::create_dir_all(&log_dir)?;
@@ -88,9 +88,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Daemon => {
             let config = config::Config::load()?;
-            // Run inside a LocalSet since ACP requires spawn_local
-            let local = tokio::task::LocalSet::new();
-            local.run_until(daemon::run_daemon(config)).await?;
+            daemon::run_daemon(config).await?;
         }
         Commands::New {
             mut path,

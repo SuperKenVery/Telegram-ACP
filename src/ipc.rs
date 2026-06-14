@@ -11,7 +11,10 @@ use crate::types::{DaemonCommand, DaemonResponse};
 /// Start listening for IPC commands on a Unix socket.
 pub async fn run_ipc_server(
     socket_path: &Path,
-    handler: impl Fn(DaemonCommand) -> futures::future::BoxFuture<'static, DaemonResponse> + 'static,
+    handler: impl Fn(DaemonCommand) -> futures::future::BoxFuture<'static, DaemonResponse>
+        + Send
+        + Sync
+        + 'static,
 ) -> Result<()> {
     // Remove stale socket file
     let _ = std::fs::remove_file(socket_path);
@@ -26,7 +29,7 @@ pub async fn run_ipc_server(
     loop {
         let (stream, _) = listener.accept().await?;
         let handler = handler.clone();
-        tokio::task::spawn_local(async move {
+        tokio::spawn(async move {
             if let Err(e) = handle_ipc_connection(stream, &*handler).await {
                 tracing::error!("IPC connection error: {e}");
             }
@@ -36,7 +39,9 @@ pub async fn run_ipc_server(
 
 async fn handle_ipc_connection(
     stream: UnixStream,
-    handler: &dyn Fn(DaemonCommand) -> futures::future::BoxFuture<'static, DaemonResponse>,
+    handler: &(dyn Fn(DaemonCommand) -> futures::future::BoxFuture<'static, DaemonResponse>
+          + Send
+          + Sync),
 ) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);

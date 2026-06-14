@@ -1,4 +1,3 @@
-use acp::Agent;
 use agent_client_protocol as acp;
 use anyhow::Result;
 use std::collections::VecDeque;
@@ -8,13 +7,15 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::session_log::{SessionLog, TranscriptDirection};
 use crate::types::AgentEvent;
 
 pub type SharedStderrTail = Arc<Mutex<VecDeque<String>>>;
+pub type AgentConnection = sacp::ConnectionTo<sacp::Agent>;
+
 const STDERR_TAIL_MAX_LINES: usize = 50;
 
 pub struct SessionBootstrap {
@@ -23,105 +24,13 @@ pub struct SessionBootstrap {
     pub config_options: Vec<acp::SessionConfigOption>,
 }
 
-/// Our ACP Client implementation that forwards agent notifications as AgentEvents.
-pub struct TelegramClient {
-    event_tx: mpsc::UnboundedSender<AgentEvent>,
-    session_log: Arc<SessionLog>,
-    /// When true, session_notification is a no-op (suppresses replay during load).
-    pub session_loading_in_progress: Arc<AtomicBool>,
-}
-
-impl TelegramClient {
-    pub fn new(
-        event_tx: mpsc::UnboundedSender<AgentEvent>,
-        session_log: Arc<SessionLog>,
-        session_loading_in_progress: Arc<AtomicBool>,
-    ) -> Self {
-        Self {
-            event_tx,
-            session_log,
-            session_loading_in_progress,
-        }
-    }
-
-    fn send_event(&self, event: AgentEvent) {
-        let _ = self.event_tx.send(event);
-    }
-}
-
-#[async_trait::async_trait(?Send)]
-impl acp::Client for TelegramClient {
-    async fn request_permission(
-        &self,
-        args: acp::RequestPermissionRequest,
-    ) -> acp::Result<acp::RequestPermissionResponse> {
-        // Auto-approve: pick the first "allow" option, or first option if none are allow
-        let option_id = args
-            .options
-            .iter()
-            .find(|o| {
-                matches!(
-                    o.kind,
-                    acp::PermissionOptionKind::AllowAlways | acp::PermissionOptionKind::AllowOnce
-                )
-            })
-            .or(args.options.first())
-            .map(|o| o.option_id.clone())
-            .unwrap_or_else(|| acp::PermissionOptionId::new("allow_always"));
-
-        Ok(acp::RequestPermissionResponse::new(
-            acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(option_id)),
-        ))
-    }
-
-    async fn session_notification(&self, args: acp::SessionNotification) -> acp::Result<()> {
-        if self.session_loading_in_progress.load(Ordering::Relaxed) {
-            return Ok(());
-        }
-
-        let session_id = args.session_id;
-        let update = args.update;
-        if let Err(err) = self.session_log.log_acp_payload(
-            TranscriptDirection::FromAgent,
-            &serde_json::json!({
-                "type": "session_notification",
-                "session_id": &session_id,
-                "update": &update,
-            }),
-        ) {
-            tracing::warn!("Failed to record ACP notification: {err}");
-        }
-
-        match update {
-            acp::SessionUpdate::AgentMessageChunk(_)
-            | acp::SessionUpdate::AgentThoughtChunk(_)
-            | acp::SessionUpdate::ToolCall(_)
-            | acp::SessionUpdate::ToolCallUpdate(_)
-            | acp::SessionUpdate::Plan(_)
-            | acp::SessionUpdate::AvailableCommandsUpdate(_)
-            | acp::SessionUpdate::UsageUpdate(_) => self.send_event(AgentEvent::Update(update)),
-            _ => {
-                // Ignore other notification types (UserMessageChunk, mode/config updates, etc.)
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Spawn an ACP agent subprocess and return the connection + child handle.
-/// Must be called within a tokio LocalSet.
-pub fn spawn_agent(
+pub async fn spawn_agent(
     agent_cmd: &str,
     project_path: &Path,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
     session_log: Arc<SessionLog>,
     session_loading_in_progress: Arc<AtomicBool>,
-) -> Result<(
-    acp::ClientSideConnection,
-    tokio::process::Child,
-    SharedStderrTail,
-    impl std::future::Future<Output = acp::Result<()>>,
-)> {
+) -> Result<(AgentConnection, tokio::process::Child, SharedStderrTail)> {
     // Execute via shell so user-configured commands support shell expansion
     // (e.g. `~`, quoted args, and env interpolation) consistently with manual runs.
     let mut child = Command::new("bash")
@@ -139,14 +48,110 @@ pub fn spawn_agent(
     let stderr = child.stderr.take().unwrap();
 
     let stderr_tail = spawn_stderr_drain(stderr, session_log.clone());
+    let transport = sacp::ByteStreams::new(stdin, stdout);
+    let (conn_tx, conn_rx) = oneshot::channel();
+    let io_event_tx = event_tx.clone();
+    let notification_session_log = session_log.clone();
+    let notification_loading = session_loading_in_progress.clone();
 
-    let client = TelegramClient::new(event_tx, session_log, session_loading_in_progress);
+    tokio::spawn(async move {
+        let connect_result = sacp::Client
+            .builder()
+            .name("telegram-acp")
+            .on_receive_notification(
+                async move |args: acp::SessionNotification, _connection| {
+                    handle_session_notification(
+                        args,
+                        &notification_session_log,
+                        &event_tx,
+                        &notification_loading,
+                    );
+                    Ok(())
+                },
+                sacp::on_receive_notification!(),
+            )
+            .on_receive_request(
+                async move |args: acp::RequestPermissionRequest, responder, _connection| {
+                    responder.respond(auto_approve_permission(args))
+                },
+                sacp::on_receive_request!(),
+            )
+            .connect_with(transport, |connection: AgentConnection| async move {
+                let _ = conn_tx.send(connection);
+                std::future::pending::<Result<(), sacp::Error>>().await
+            })
+            .await;
 
-    let (conn, handle_io) = acp::ClientSideConnection::new(client, stdin, stdout, |fut| {
-        tokio::task::spawn_local(fut);
+        if let Err(err) = connect_result {
+            tracing::error!("ACP IO error: {err}");
+            let _ = io_event_tx.send(AgentEvent::Error(format!("Agent connection error: {err}")));
+        }
     });
 
-    Ok((conn, child, stderr_tail, handle_io))
+    let conn = conn_rx
+        .await
+        .map_err(|_| anyhow::anyhow!("ACP connection task exited before startup"))?;
+    Ok((conn, child, stderr_tail))
+}
+
+fn auto_approve_permission(args: acp::RequestPermissionRequest) -> acp::RequestPermissionResponse {
+    let option_id = args
+        .options
+        .iter()
+        .find(|o| {
+            matches!(
+                o.kind,
+                acp::PermissionOptionKind::AllowAlways | acp::PermissionOptionKind::AllowOnce
+            )
+        })
+        .or(args.options.first())
+        .map(|o| o.option_id.clone());
+
+    match option_id {
+        Some(option_id) => acp::RequestPermissionResponse::new(
+            acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(option_id)),
+        ),
+        None => acp::RequestPermissionResponse::new(acp::RequestPermissionOutcome::Cancelled),
+    }
+}
+
+fn handle_session_notification(
+    args: acp::SessionNotification,
+    session_log: &SessionLog,
+    event_tx: &mpsc::UnboundedSender<AgentEvent>,
+    session_loading_in_progress: &AtomicBool,
+) {
+    if session_loading_in_progress.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let session_id = args.session_id;
+    let update = args.update;
+    if let Err(err) = session_log.log_acp_payload(
+        TranscriptDirection::FromAgent,
+        &serde_json::json!({
+            "type": "session_notification",
+            "session_id": &session_id,
+            "update": &update,
+        }),
+    ) {
+        tracing::warn!("Failed to record ACP notification: {err}");
+    }
+
+    match update {
+        acp::SessionUpdate::AgentMessageChunk(_)
+        | acp::SessionUpdate::AgentThoughtChunk(_)
+        | acp::SessionUpdate::ToolCall(_)
+        | acp::SessionUpdate::ToolCallUpdate(_)
+        | acp::SessionUpdate::Plan(_)
+        | acp::SessionUpdate::AvailableCommandsUpdate(_)
+        | acp::SessionUpdate::UsageUpdate(_) => {
+            let _ = event_tx.send(AgentEvent::Update(update));
+        }
+        _ => {
+            // Ignore other notification types (UserMessageChunk, mode/config updates, etc.)
+        }
+    }
 }
 
 fn spawn_stderr_drain(
@@ -156,7 +161,7 @@ fn spawn_stderr_drain(
     let stderr_tail: SharedStderrTail = Arc::new(Mutex::new(VecDeque::new()));
     let stderr_tail_for_task = Arc::clone(&stderr_tail);
 
-    tokio::task::spawn_local(async move {
+    tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         loop {
             match lines.next_line().await {
@@ -208,9 +213,8 @@ pub fn format_stderr_tail(stderr_tail: &SharedStderrTail) -> String {
     }
 }
 
-/// Initialize an ACP connection: call initialize + new_session, return session_id.
 pub async fn init_session(
-    conn: &acp::ClientSideConnection,
+    conn: &AgentConnection,
     project_path: &Path,
     mcp_servers: Vec<acp::McpServer>,
     session_log: &SessionLog,
@@ -222,7 +226,7 @@ pub async fn init_session(
         TranscriptDirection::ToAgent,
         &serde_json::json!({ "method": "initialize", "params": &init_request }),
     )?;
-    let init_response = conn.initialize(init_request).await?;
+    let init_response = conn.send_request(init_request).block_task().await?;
     session_log.log_acp_payload(
         TranscriptDirection::FromAgent,
         &serde_json::json!({ "method": "initialize", "result": &init_response }),
@@ -233,7 +237,7 @@ pub async fn init_session(
         TranscriptDirection::ToAgent,
         &serde_json::json!({ "method": "new_session", "params": &new_session_request }),
     )?;
-    let session_resp = conn.new_session(new_session_request).await?;
+    let session_resp = conn.send_request(new_session_request).block_task().await?;
     session_log.log_acp_payload(
         TranscriptDirection::FromAgent,
         &serde_json::json!({ "method": "new_session", "result": &session_resp }),
@@ -246,9 +250,8 @@ pub async fn init_session(
     })
 }
 
-/// Resume a previous ACP session using load_session if supported, otherwise fall back to new_session.
 pub async fn resume_session(
-    conn: &acp::ClientSideConnection,
+    conn: &AgentConnection,
     project_path: &Path,
     old_acp_session_id: String,
     mcp_servers: Vec<acp::McpServer>,
@@ -261,7 +264,7 @@ pub async fn resume_session(
         TranscriptDirection::ToAgent,
         &serde_json::json!({ "method": "initialize", "params": &init_request }),
     )?;
-    let init_resp = conn.initialize(init_request).await?;
+    let init_resp = conn.send_request(init_request).block_task().await?;
     session_log.log_acp_payload(
         TranscriptDirection::FromAgent,
         &serde_json::json!({ "method": "initialize", "result": &init_resp }),
@@ -279,22 +282,21 @@ pub async fn resume_session(
             TranscriptDirection::ToAgent,
             &serde_json::json!({ "method": "load_session", "params": &load_request }),
         )?;
-        match conn.load_session(load_request).await {
+        match conn.send_request(load_request).block_task().await {
             Ok(load_resp) => {
                 session_log.log_acp_payload(
                     TranscriptDirection::FromAgent,
                     &serde_json::json!({ "method": "load_session", "result": &load_resp }),
                 )?;
-                // load_session succeeded — reuse the same session ID
                 Ok(SessionBootstrap {
                     session_id,
                     modes: load_resp.modes,
                     config_options: load_resp.config_options.unwrap_or_default(),
                 })
             }
-            Err(e) => {
+            Err(err) => {
                 tracing::warn!(
-                    "load_session failed for {}, falling back to new_session: {e}",
+                    "load_session failed for {}, falling back to new_session: {err}",
                     session_id
                 );
                 let new_session_request =
@@ -303,7 +305,7 @@ pub async fn resume_session(
                     TranscriptDirection::ToAgent,
                     &serde_json::json!({ "method": "new_session", "params": &new_session_request }),
                 )?;
-                let session_resp = conn.new_session(new_session_request).await?;
+                let session_resp = conn.send_request(new_session_request).block_task().await?;
                 session_log.log_acp_payload(
                     TranscriptDirection::FromAgent,
                     &serde_json::json!({ "method": "new_session", "result": &session_resp }),
@@ -323,7 +325,7 @@ pub async fn resume_session(
             TranscriptDirection::ToAgent,
             &serde_json::json!({ "method": "new_session", "params": &new_session_request }),
         )?;
-        let session_resp = conn.new_session(new_session_request).await?;
+        let session_resp = conn.send_request(new_session_request).block_task().await?;
         session_log.log_acp_payload(
             TranscriptDirection::FromAgent,
             &serde_json::json!({ "method": "new_session", "result": &session_resp }),

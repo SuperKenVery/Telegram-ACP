@@ -21,7 +21,7 @@ use crate::mcp;
 use crate::persistence::{self, PersistedTopic};
 use crate::session;
 use crate::session_control::{self, SessionCommand};
-use crate::session_log::{self, with_session_context, SessionContext, SessionLog};
+use crate::session_log::{with_session_context, SessionContext, SessionLog};
 use crate::telegram;
 use crate::types::{AgentEvent, SessionRecord, SessionStatus};
 use crate::{sess_error, sess_info};
@@ -30,8 +30,8 @@ use crate::{sess_error, sess_info};
 pub struct DaemonHandle {
     pub config: Config,
     pub bot: Bot,
-    /// Relay for starting ACP sessions inside the daemon's LocalSet task.
-    local_start_tx: mpsc::UnboundedSender<StartSessionRequest>,
+    /// Queue for starting ACP sessions from handlers that only borrow the daemon.
+    session_start_tx: mpsc::UnboundedSender<StartSessionRequest>,
     /// thread_id -> TopicEntry
     pub topics: DashMap<i32, TopicEntry>,
 }
@@ -368,7 +368,7 @@ impl DaemonHandle {
         initiated_via_switch: bool,
     ) -> Result<String> {
         let (result_tx, result_rx) = oneshot::channel();
-        self.local_start_tx
+        self.session_start_tx
             .send(StartSessionRequest {
                 thread_id,
                 project_path,
@@ -387,7 +387,7 @@ impl DaemonHandle {
 
     /// Common logic for starting a session (new or restored).
     /// Spawns event consumer and agent task, waits for ACP init, inserts into DashMap.
-    async fn start_session_local(
+    async fn start_session(
         self: Arc<Self>,
         thread_id: i32,
         project_path: PathBuf,
@@ -424,10 +424,10 @@ impl DaemonHandle {
         let mcp_session_id = mcp_session.id.clone();
         let mcp_servers = build_mcp_servers(&mcp_session_id, &self.config.socket_path)?;
 
-        // Spawn the event consumer within LocalSet.
+        // Spawn the event consumer for this topic.
         let bot = self.bot.clone();
         let chat_id = ChatId(self.config.chat_id);
-        tokio::task::spawn_local(with_session_context(
+        tokio::spawn(with_session_context(
             session_context.clone(),
             session::run_event_consumer(
                 bot,
@@ -474,8 +474,8 @@ impl DaemonHandle {
         // Create oneshot for receiving the ACP session ID
         let (result_tx, result_rx) = oneshot::channel();
 
-        // Spawn ACP init + session loop directly in LocalSet.
-        tokio::task::spawn_local(with_session_context(
+        // Spawn ACP init + session loop.
+        tokio::spawn(with_session_context(
             session_context,
             spawn_and_run_agent(
                 agent_cmd.clone(),
@@ -681,21 +681,21 @@ async fn init_agent(
     existing_acp_session_id: &Option<String>,
     mcp_servers: Vec<acp_sdk::McpServer>,
 ) -> Result<(
-    agent_client_protocol::ClientSideConnection,
+    acp::AgentConnection,
     tokio::process::Child,
     acp::SessionBootstrap,
     Arc<AtomicBool>,
 )> {
     let session_loading_in_progress = Arc::new(AtomicBool::new(existing_acp_session_id.is_some()));
-    let io_event_tx = event_tx.clone();
 
-    let (conn, child, stderr_tail, handle_io) = acp::spawn_agent(
+    let (conn, child, stderr_tail) = acp::spawn_agent(
         agent_cmd,
         project_path,
         event_tx,
         session_log.clone(),
         session_loading_in_progress.clone(),
     )
+    .await
     .map_err(|e| {
         anyhow::anyhow!(
             "failed to spawn ACP agent process (cmd: {}, project: {}): {:#}",
@@ -704,22 +704,6 @@ async fn init_agent(
             e
         )
     })?;
-
-    if let Some(ctx) = session_log::try_current_session_context() {
-        tokio::task::spawn_local(with_session_context(ctx, async move {
-            if let Err(e) = handle_io.await {
-                sess_error!("ACP IO error: {e}");
-                let _ = io_event_tx.send(AgentEvent::Error(format!("Agent connection error: {e}")));
-            }
-        }));
-    } else {
-        tokio::task::spawn_local(async move {
-            if let Err(e) = handle_io.await {
-                tracing::error!("ACP IO error: {e}");
-                let _ = io_event_tx.send(AgentEvent::Error(format!("Agent connection error: {e}")));
-            }
-        });
-    }
 
     let bootstrap = if let Some(old_id) = existing_acp_session_id.clone() {
         let session = acp::resume_session(
@@ -797,22 +781,22 @@ pub async fn run_daemon(config: Config) -> Result<()> {
     tracing::info!("Starting telegram-acp daemon");
 
     let bot = Bot::new(&config.bot_token);
-    let (local_start_tx, mut local_start_rx) = mpsc::unbounded_channel::<StartSessionRequest>();
+    let (session_start_tx, mut session_start_rx) = mpsc::unbounded_channel::<StartSessionRequest>();
 
     let daemon = Arc::new(DaemonHandle {
         config: config.clone(),
         bot: bot.clone(),
-        local_start_tx,
+        session_start_tx,
         topics: DashMap::new(),
     });
 
-    let local_daemon = daemon.clone();
-    tokio::task::spawn_local(async move {
-        while let Some(req) = local_start_rx.recv().await {
-            let local_daemon = local_daemon.clone();
-            tokio::task::spawn_local(async move {
-                let res = local_daemon
-                    .start_session_local(
+    let session_daemon = daemon.clone();
+    tokio::spawn(async move {
+        while let Some(req) = session_start_rx.recv().await {
+            let session_daemon = session_daemon.clone();
+            tokio::spawn(async move {
+                let res = session_daemon
+                    .start_session(
                         req.thread_id,
                         req.project_path,
                         req.agent_cmd,
@@ -830,7 +814,7 @@ pub async fn run_daemon(config: Config) -> Result<()> {
     // spawned during load_session can connect to the socket immediately.
     let ipc_daemon = daemon.clone();
     let socket_path = config.socket_path.clone();
-    tokio::task::spawn_local(async move {
+    tokio::spawn(async move {
         if let Err(e) = crate::ipc::run_ipc_server(&socket_path, move |cmd| {
             let daemon = ipc_daemon.clone();
             Box::pin(async move {
