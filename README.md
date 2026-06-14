@@ -2,10 +2,10 @@
 
 **Control any coding agent through Telegram.**
 
-| Screenshots | Screenshots | Screenshots |
-|---|---|---|
+| Screenshots                                                                                                     | Screenshots                                                                                                     | Screenshots                                                                                                   |
+| --------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
 | ![photo_1_2026-03-14_01-08-15](https://github.com/user-attachments/assets/e84143a7-58ac-4927-991f-b9cbb772aae2) | ![photo_2_2026-03-14_01-08-15](https://github.com/user-attachments/assets/18346bb9-39a9-4199-b206-e3fe7135e42b) | ![photo_2026-03-14_01-13-09](https://github.com/user-attachments/assets/53ac0332-0ca7-4683-bb36-f0d49e84f0a0) |
-| **Talking with agent.** <br/> Handle multiple sessions with tabs and threads. | **Uploading artifacts.** <br/>Use telegraph to view your markdown files, or let it upload images or files. | **Slash commands.** <br/>Manage your sessions with ease, set models and permissions, or use agent's commands. |
+| **Talking with agent.** <br/> Handle multiple sessions with tabs and threads.                                   | **Uploading artifacts.** <br/>Use telegraph to view your markdown files, or let it upload images or files.      | **Slash commands.** <br/>Manage your sessions with ease, set models and permissions, or use agent's commands. |
 
 ## Features
 
@@ -69,7 +69,11 @@ Create `~/.config/telegram-acp/config.toml`:
 bot_token = "<telegram-bot-token>"
 chat_id = 123456789
 default_agent = "claude"
-# tray = false  # disable the menu bar/tray icon; omitted means auto with headless fallback
+
+# Control tray icon (menu bar on macOS)
+# true: Use tray icon; false: Don't use
+# omit: Try to create tray icon, fail silently
+# tray = false
 
 [claude]
 cmd = "claude-agent-acp"
@@ -103,7 +107,6 @@ Per session:
 1. Creates/uses a Telegram forum topic (or threaded private chat topic)
 2. Spawns an ACP agent subprocess
 3. Routes user messages -> agent and agent events -> Telegram
-
 
 ## Mock agent testing
 
