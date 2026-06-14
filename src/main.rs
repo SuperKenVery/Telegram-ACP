@@ -88,7 +88,17 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Daemon => {
             let config = config::Config::load()?;
-            tray::run_daemon_with_tray(config)?;
+            match config.tray {
+                Some(false) => run_daemon_without_tray(config)?,
+                Some(true) => tray::run_daemon_with_tray(config)?,
+                None => match tray::run_daemon_with_tray(config.clone()) {
+                    Ok(()) => {}
+                    Err(err) => {
+                        tracing::warn!("Tray startup failed; running headless daemon: {err}");
+                        run_daemon_without_tray(config)?;
+                    }
+                },
+            }
         }
         Commands::New {
             mut path,
@@ -171,6 +181,13 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn run_daemon_without_tray(config: config::Config) -> anyhow::Result<()> {
+    async_main(async move {
+        let local = tokio::task::LocalSet::new();
+        local.run_until(daemon::run_daemon(config, None)).await
+    })
 }
 
 fn async_main<F>(future: F) -> anyhow::Result<()>

@@ -1,7 +1,7 @@
 use std::sync::mpsc;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use tao::event::{Event, StartCause};
 use tao::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
 use tokio::runtime::Handle;
@@ -44,7 +44,7 @@ struct TraySession {
 }
 
 pub fn run_daemon_with_tray(config: Config) -> Result<()> {
-    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    let event_loop = build_event_loop()?;
     let proxy = event_loop.create_proxy();
 
     TrayIconEvent::set_event_handler(Some(move |_event| {
@@ -111,6 +111,27 @@ pub fn run_daemon_with_tray(config: Config) -> Result<()> {
             _ => {}
         }
     });
+}
+
+fn build_event_loop() -> Result<tao::event_loop::EventLoop<UserEvent>> {
+    std::panic::catch_unwind(|| EventLoopBuilder::<UserEvent>::with_user_event().build()).map_err(
+        |panic| {
+            anyhow!(
+                "failed to initialize tray event loop: {}",
+                panic_message(panic)
+            )
+        },
+    )
+}
+
+fn panic_message(panic: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = panic.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = panic.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic".to_string()
+    }
 }
 
 fn run_daemon_thread(config: Config, ready_tx: mpsc::Sender<(Arc<DaemonHandle>, Handle)>) {

@@ -69,6 +69,7 @@ Create `~/.config/telegram-acp/config.toml`:
 bot_token = "<telegram-bot-token>"
 chat_id = 123456789
 default_agent = "claude"
+# tray = false  # disable the menu bar/tray icon; omitted means auto with headless fallback
 
 [claude]
 cmd = "claude-agent-acp"
