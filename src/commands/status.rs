@@ -35,14 +35,16 @@ impl Command for StatusCommand {
         let working_dir = active.project_path.display();
 
         let log_dir = active.session_log.log_dir().display().to_string();
+        let verbose = *topic.verbose.lock().await;
 
         let status_text = format!(
             "<b>Session Status</b>\n\n\
             <b>Agent:</b> {}\n\
             <b>Command:</b> <code>{}</code>\n\
             <b>Working Directory:</b> <code>{}</code>\n\
-            <b>Log Directory:</b> <code>{}</code>",
-            agent_name, agent_command, working_dir, log_dir
+            <b>Log Directory:</b> <code>{}</code>\n\
+            <b>Verbose:</b> <code>{}</code>",
+            agent_name, agent_command, working_dir, log_dir, verbose
         );
 
         ctx.bot

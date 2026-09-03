@@ -25,7 +25,7 @@ use crate::session;
 use crate::session_control::{self, SessionCommand};
 use crate::session_log::{self, with_session_context, SessionContext, SessionLog};
 use crate::telegram;
-use crate::types::{AgentEvent, SessionRecord, SessionStatus};
+use crate::types::{AgentEvent, SessionRecord, SessionStatus, VerboseMode};
 use crate::{sess_error, sess_info};
 
 /// Shared daemon state, accessible from Telegram handlers and IPC.
@@ -43,6 +43,8 @@ pub struct TopicEntry {
     pub active: Option<SessionEntry>,
     /// All sessions ever bound to this topic.
     pub history: Vec<SessionRecord>,
+    /// Tool-message verbosity for this Telegram thread.
+    pub verbose: Arc<tokio::sync::Mutex<VerboseMode>>,
 }
 
 pub struct SessionEntry {
@@ -206,6 +208,27 @@ impl DaemonHandle {
         Some(commands)
     }
 
+    pub async fn get_thread_verbose(&self, thread_id: i32) -> Option<VerboseMode> {
+        let verbose = self.topics.get(&thread_id)?.verbose.clone();
+        let mode = *verbose.lock().await;
+        Some(mode)
+    }
+
+    pub async fn set_thread_verbose(&self, thread_id: i32, mode: VerboseMode) -> Result<()> {
+        let verbose = {
+            let topic = self
+                .topics
+                .get(&thread_id)
+                .ok_or_else(|| anyhow::anyhow!("No topic for this thread"))?;
+            topic.verbose.clone()
+        };
+
+        *verbose.lock().await = mode;
+
+        self.persist_topics().await;
+        Ok(())
+    }
+
     /// Persist current topics to disk.
     pub async fn persist_topics(&self) {
         let mut persisted = Vec::new();
@@ -217,6 +240,7 @@ impl DaemonHandle {
                 thread_id,
                 active_session_id,
                 sessions: topic.history.clone(),
+                verbose: *topic.verbose.lock().await,
             });
         }
         if let Err(e) = persistence::save_topics(&persisted) {
@@ -246,6 +270,11 @@ impl DaemonHandle {
             .icon_color(teloxide::types::Rgb::from_u32(0x6FB9F0))
             .await?;
         let thread_id = topic.thread_id.0 .0;
+        self.topics.entry(thread_id).or_insert_with(|| TopicEntry {
+            active: None,
+            history: Vec::new(),
+            verbose: Arc::new(tokio::sync::Mutex::new(VerboseMode::default())),
+        });
 
         let acp_session_id = match self
             .enqueue_start_session(
@@ -415,6 +444,17 @@ impl DaemonHandle {
         let (cancel_tx, cancel_rx) = mpsc::unbounded_channel::<oneshot::Sender<Result<()>>>();
         let (event_tx, event_rx) = mpsc::unbounded_channel::<AgentEvent>();
         let available_commands = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let verbose_state = self
+            .topics
+            .entry(thread_id)
+            .or_insert_with(|| TopicEntry {
+                active: None,
+                history: Vec::new(),
+                verbose: Arc::new(tokio::sync::Mutex::new(VerboseMode::default())),
+            })
+            .verbose
+            .clone();
+        let verbose = *verbose_state.lock().await;
 
         let status = Arc::new(tokio::sync::Mutex::new(SessionStatus::Initializing));
         let session_log = SessionLog::new(
@@ -449,6 +489,7 @@ impl DaemonHandle {
                 thread_id,
                 event_rx,
                 available_commands.clone(),
+                verbose_state.clone(),
             ),
         ));
 
@@ -482,6 +523,7 @@ impl DaemonHandle {
             .or_insert_with(|| TopicEntry {
                 active: None,
                 history: Vec::new(),
+                verbose: verbose_state.clone(),
             })
             .active = Some(session_entry);
 
@@ -540,6 +582,7 @@ impl DaemonHandle {
         let mut topic = self.topics.entry(thread_id).or_insert_with(|| TopicEntry {
             active: None,
             history: Vec::new(),
+            verbose: Arc::new(tokio::sync::Mutex::new(verbose)),
         });
         // Check if this session already exists in history (resume case)
         let existing = topic
@@ -926,6 +969,7 @@ pub async fn run_daemon(
                 TopicEntry {
                     active: None,
                     history: pt.sessions.clone(),
+                    verbose: Arc::new(tokio::sync::Mutex::new(pt.verbose)),
                 },
             );
         }

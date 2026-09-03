@@ -14,7 +14,7 @@ use crate::handlers::working::WorkingHandler;
 use crate::handlers::{EventContext, EventHandler};
 use crate::session_control::{build_control_state, SessionCommand};
 use crate::session_log::{self, with_session_context, TranscriptDirection};
-use crate::types::{AgentEvent, SessionStatus};
+use crate::types::{AgentEvent, SessionStatus, VerboseMode};
 use crate::{sess_error, sess_info, sess_warn};
 
 enum PromptOutcome {
@@ -312,12 +312,13 @@ pub async fn run_event_consumer(
     thread_id: i32,
     mut event_rx: mpsc::UnboundedReceiver<AgentEvent>,
     available_commands_cache: Arc<Mutex<Vec<acp::AvailableCommand>>>,
+    verbose: Arc<Mutex<VerboseMode>>,
 ) {
     sess_info!("Event consumer started");
     let mut ctx = EventContext::new(bot, chat_id, thread_id);
     let mut draft = DraftHandler::new();
     let mut working = WorkingHandler::new();
-    let mut tool_call = ToolCallHandler::new();
+    let mut tool_call = ToolCallHandler::new(verbose);
     let mut plan = PlanHandler::new();
 
     while let Some(event) = event_rx.recv().await {

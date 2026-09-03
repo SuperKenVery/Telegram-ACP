@@ -20,6 +20,7 @@ mod status;
 mod stop_daemon;
 mod switch;
 mod timer;
+mod verbose;
 
 use cancel::CancelCommand;
 use command::CommandCommand;
@@ -33,6 +34,7 @@ use status::StatusCommand;
 use stop_daemon::StopDaemonCommand;
 use switch::SwitchCommand;
 use timer::TimerCommand;
+use verbose::VerboseCommand;
 
 pub struct CommandContext<'a> {
     pub bot: &'a Bot,
@@ -77,6 +79,7 @@ fn command_registry() -> Vec<Box<dyn Command>> {
         Box::new(CommandsCommand),
         Box::new(CommandCommand),
         Box::new(TimerCommand),
+        Box::new(VerboseCommand),
         Box::new(StatusCommand),
         Box::new(SwitchCommand),
         Box::new(StopDaemonCommand),
@@ -298,6 +301,7 @@ mod tests {
         assert!(has_registered_command("command"));
         assert!(has_registered_command("new"));
         assert!(has_registered_command("timer"));
+        assert!(has_registered_command("verbose"));
         assert!(has_registered_command("status"));
         assert!(has_registered_command("switch"));
         assert!(!has_registered_command("missing"));
