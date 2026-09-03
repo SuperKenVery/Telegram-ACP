@@ -1,29 +1,34 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use agent_client_protocol as acp;
 use similar::TextDiff;
 use teloxide::types::MessageId;
+use tokio::sync::Mutex;
 
 use super::{EventContext, EventHandler};
 use crate::formatting;
 use crate::types::AgentEvent;
 
 struct ToolCallMessageState {
-    msg_id: MessageId,
+    last_sent: Option<(MessageId, String)>,
     name: String,
     kind: acp::ToolKind,
     status: acp::ToolCallStatus,
+    display_mode: crate::types::VerboseMode,
     details: Option<String>,
 }
 
 pub struct ToolCallHandler {
     messages: HashMap<String, ToolCallMessageState>,
+    verbose: Arc<Mutex<crate::types::VerboseMode>>,
 }
 
 impl ToolCallHandler {
-    pub fn new() -> Self {
+    pub fn new(verbose: Arc<Mutex<crate::types::VerboseMode>>) -> Self {
         Self {
             messages: HashMap::new(),
+            verbose,
         }
     }
 }
@@ -56,24 +61,23 @@ impl ToolCallHandler {
         let kind = tool_call.kind;
         let status = tool_call.status;
         let details = extract_tool_diff(&tool_call.content);
-        if let Some(sent) = ctx
-            .send_markdown(
-                &formatting::format_tool_call(&name, kind, status, details.as_deref()),
-                true,
-            )
-            .await
-        {
-            self.messages.insert(
-                id,
-                ToolCallMessageState {
-                    msg_id: sent.id,
-                    name,
-                    kind,
-                    status,
-                    details,
-                },
-            );
+        let verbose = *self.verbose.lock().await;
+        let mut state = ToolCallMessageState {
+            last_sent: None,
+            name,
+            kind,
+            status,
+            display_mode: verbose,
+            details,
+        };
+
+        if verbose != crate::types::VerboseMode::Off {
+            let text = Self::format_initial_state(verbose, &state);
+            if let Some(message) = ctx.send_markdown(&text, true).await {
+                state.last_sent = Some((message.id, text));
+            }
         }
+        self.messages.insert(id, state);
     }
 
     async fn handle_tool_call_update(
@@ -91,6 +95,7 @@ impl ToolCallHandler {
             .as_ref()
             .and_then(|contents| extract_tool_result_text(contents));
         let details = extract_tool_diff(fields.content.as_deref().unwrap_or(&[]));
+        let verbose = *self.verbose.lock().await;
 
         let resolved_name = if !name.is_empty() {
             name.clone()
@@ -111,42 +116,81 @@ impl ToolCallHandler {
         let resolved_status = status
             .or_else(|| self.messages.get(&id).map(|s| s.status))
             .unwrap_or(acp::ToolCallStatus::Pending);
-        let text = formatting::format_tool_result(
-            &resolved_name,
-            resolved_kind,
-            resolved_status,
-            output.as_deref(),
-            resolved_details.as_deref(),
-        );
-
         if let Some(state) = self.messages.get_mut(&id) {
-            ctx.edit_markdown(state.msg_id, &text).await;
-            if !name.is_empty() {
-                state.name = name;
-            }
-            if let Some(k) = kind {
-                state.kind = k;
-            }
-            if let Some(s) = status {
-                state.status = s;
-            }
+            state.name = resolved_name.clone();
+            state.kind = resolved_kind;
+            state.status = resolved_status;
             if details.is_some() {
                 state.details = details;
+            }
+
+            if let Some((msg_id, last_text)) = state.last_sent.as_ref() {
+                let text = Self::format_state(state.display_mode, state, output.as_deref());
+                let msg_id = *msg_id;
+                if last_text != &text && ctx.edit_markdown(msg_id, &text).await {
+                    state.last_sent = Some((msg_id, text));
+                }
+            } else if state.display_mode != crate::types::VerboseMode::Off {
+                let text = Self::format_state(state.display_mode, state, output.as_deref());
+                if let Some(sent) = ctx.send_markdown(&text, true).await {
+                    state.last_sent = Some((sent.id, text));
+                }
             }
             return;
         }
 
-        if let Some(sent) = ctx.send_markdown(&text, true).await {
-            self.messages.insert(
-                id,
-                ToolCallMessageState {
-                    msg_id: sent.id,
-                    name: resolved_name,
-                    kind: resolved_kind,
-                    status: resolved_status,
-                    details: resolved_details,
-                },
-            );
+        let mut state = ToolCallMessageState {
+            last_sent: None,
+            name: resolved_name,
+            kind: resolved_kind,
+            status: resolved_status,
+            display_mode: verbose,
+            details: resolved_details,
+        };
+        if verbose != crate::types::VerboseMode::Off {
+            let text = Self::format_state(verbose, &state, output.as_deref());
+            if let Some(message) = ctx.send_markdown(&text, true).await {
+                state.last_sent = Some((message.id, text));
+            }
+        }
+        self.messages.insert(id, state);
+    }
+
+    fn format_state(
+        mode: crate::types::VerboseMode,
+        state: &ToolCallMessageState,
+        output: Option<&str>,
+    ) -> String {
+        match mode {
+            crate::types::VerboseMode::Off => String::new(),
+            crate::types::VerboseMode::Compact => {
+                formatting::format_tool_compact(&state.name, state.kind, state.status)
+            }
+            crate::types::VerboseMode::On => formatting::format_tool_result(
+                &state.name,
+                state.kind,
+                state.status,
+                output,
+                state.details.as_deref(),
+            ),
+        }
+    }
+
+    fn format_initial_state(
+        mode: crate::types::VerboseMode,
+        state: &ToolCallMessageState,
+    ) -> String {
+        match mode {
+            crate::types::VerboseMode::Off => String::new(),
+            crate::types::VerboseMode::Compact => {
+                formatting::format_tool_compact(&state.name, state.kind, state.status)
+            }
+            crate::types::VerboseMode::On => formatting::format_tool_call(
+                &state.name,
+                state.kind,
+                state.status,
+                state.details.as_deref(),
+            ),
         }
     }
 }

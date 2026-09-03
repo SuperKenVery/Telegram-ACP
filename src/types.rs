@@ -49,6 +49,31 @@ pub struct SessionInfo {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VerboseMode {
+    Off,
+    Compact,
+    On,
+}
+
+impl Default for VerboseMode {
+    fn default() -> Self {
+        Self::On
+    }
+}
+
+impl std::fmt::Display for VerboseMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::Off => "off",
+            Self::Compact => "compact",
+            Self::On => "on",
+        };
+        f.write_str(value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionStatus {
     Initializing,
     Idle,
@@ -87,4 +112,14 @@ pub enum AgentEvent {
     Update(acp::SessionUpdate),
     Finished(String),
     Error(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VerboseMode;
+
+    #[test]
+    fn verbose_defaults_to_on() {
+        assert_eq!(VerboseMode::default(), VerboseMode::On);
+    }
 }

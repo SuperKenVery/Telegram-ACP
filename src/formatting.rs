@@ -60,6 +60,12 @@ pub fn format_tool_result(
     )
 }
 
+/// Format a tool update without input, output, or diff details.
+pub fn format_tool_compact(name: &str, kind: acp::ToolKind, status: acp::ToolCallStatus) -> String {
+    let (summary, _) = split_tool_title_and_body(name);
+    format_tool_summary(summary, kind, status)
+}
+
 /// Format a completion message as rich Markdown.
 pub fn format_completion(stop_reason: &str) -> String {
     format!("✓ **Done** ({stop_reason})")
@@ -293,7 +299,7 @@ pub fn split_message(text: &str, max_len: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_available_commands_html, format_tool_call};
+    use super::{format_available_commands_html, format_tool_call, format_tool_compact};
     use agent_client_protocol as acp;
 
     #[test]
@@ -359,6 +365,18 @@ cargo test
 
         assert!(!text.contains("<details>"));
         assert_eq!(text, "🚧 ▶️ Run cargo test");
+    }
+
+    #[test]
+    fn formats_compact_tool_message_without_details() {
+        let text = format_tool_compact(
+            "Run cargo test\ncargo test",
+            acp::ToolKind::Execute,
+            acp::ToolCallStatus::InProgress,
+        );
+
+        assert_eq!(text, "🚧 ▶️ Run cargo test");
+        assert!(!text.contains("```"));
     }
 
     #[test]
